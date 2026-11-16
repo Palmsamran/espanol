@@ -68,9 +68,9 @@ const STARTER = [
 /* ---------- state ---------- */
 const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
 // Settings that sync between devices (voice and install hint stay per-device).
-const SYNCED_SETTINGS = ['direction', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
+const SYNCED_SETTINGS = ['direction', 'flipDirection', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
 const defaultSettings = () => ({
-  direction: 'es-en', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
+  direction: 'es-en', flipDirection: 'en-es', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
   rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false, updated: 0,
 });
 const defaultStats = () => ({ history: {} });
@@ -912,7 +912,7 @@ function flashView(id, q) {
   setHeader('Flashcards', `#/deck/${id}`);
   const all = studyCards(d, q); if (!all.length) return emptyStudy(d);
   let items; let i; let known; let missed;
-  const start = (cards) => { items = shuffle(cards).map((c) => ({ c, ...sides(c) })); i = 0; known = []; missed = []; show(); };
+  const start = (cards) => { items = shuffle(cards).map((c) => ({ c, ...sides(c, state.settings.flipDirection) })); i = 0; known = []; missed = []; show(); };
 
   function show() {
     if (i >= items.length) return summary();
@@ -1216,8 +1216,9 @@ function reviewView(q) {
   function show() {
     if (!queue.length) return summary();
     const { c, d } = queue[0];
-    const it = { c, ...sides(c) }; const ansEs = !it.promptEs; const isNew = !c.srs.last;
-    if (state.settings.reviewStyle !== 'type') return showFlip(c, d, it, isNew);
+    const flipStyle = state.settings.reviewStyle !== 'type';
+    const it = { c, ...sides(c, flipStyle ? state.settings.flipDirection : state.settings.direction) }; const ansEs = !it.promptEs; const isNew = !c.srs.last;
+    if (flipStyle) return showFlip(c, d, it, isNew);
     render(`
       ${progressTop(done, done + queue.length, `${queue.length} left`)}
       <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span><div class="q-text" ${langAttr(it.promptEs)}>${esc(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
@@ -1385,7 +1386,8 @@ function settingsView() {
   render(`<div id="settings">
     <section class="panel"><h3>Practice</h3>
       <div class="field"><span>Daily review</span>${seg('reviewStyle', [['flip', 'Flip cards'], ['type', 'Type answers']], s.reviewStyle)}</div>
-      <div class="field"><span>Show me first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
+      <div class="field"><span>Flip cards: show first</span>${seg('flipDirection', [['en-es', 'English'], ['es-en', 'Spanish'], ['mixed', 'Mixed']], s.flipDirection)}</div>
+      <div class="field"><span>Typing &amp; quizzes: show first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>
     </section>
