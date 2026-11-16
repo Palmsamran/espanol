@@ -1,7 +1,7 @@
 // Service worker: makes the app load instantly and work offline.
 // Strategy: serve from cache right away, refresh the cache in the background,
 // so updates you deploy show up the next time the app is opened.
-const CACHE = 'espanol-v2';
+const CACHE = 'espanol-v3';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
@@ -9,7 +9,7 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -27,7 +27,8 @@ self.addEventListener('fetch', (e) => {
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const cached = await cache.match(key, { ignoreSearch: true });
-    const network = fetch(req)
+    // no-cache: always check the server, so GitHub Pages' 10-minute HTTP cache can't serve stale files
+    const network = fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })
       .then((res) => { if (res.ok) cache.put(key, res.clone()); return res; })
       .catch(() => null);
     if (cached) { e.waitUntil(network); return cached; }
