@@ -405,6 +405,7 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
 .srs.good b { color: var(--good); }
 .srs.easy b { color: var(--info); }
 .srs.suggested { border-color: var(--text); }
+.review-meta { margin: -6px 0 10px; font-size: 13px; color: var(--muted); }
 .srs-help { text-align: center; font-size: 13px; color: var(--muted); margin: 10px 0 0; }
 
 /* Match */

@@ -68,9 +68,9 @@ const STARTER = [
 /* ---------- state ---------- */
 const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
 // Settings that sync between devices (voice and install hint stay per-device).
-const SYNCED_SETTINGS = ['direction', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
+const SYNCED_SETTINGS = ['direction', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
 const defaultSettings = () => ({
-  direction: 'es-en', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
+  direction: 'es-en', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
   rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false, updated: 0,
 });
 const defaultStats = () => ({ history: {} });
@@ -1169,10 +1169,55 @@ function reviewView(q) {
     return;
   }
 
+  const gradeButtons = (c, suggested = -1) => {
+    const labels = [['Again', 'again'], ['Hard', 'hard'], ['Good', 'good'], ['Easy', 'easy']];
+    return `<div class="srs-row">${labels.map(([l, k], n) => `<button type="button" class="srs ${k} ${n === suggested ? 'suggested' : ''}" data-q="${n}"><b>${l}</b><span>${fmtInterval(c.srs, n)}</span></button>`).join('')}</div>
+      <p class="srs-help">How well did you remember it?${isTouch() ? '' : ' Keys 1–4.'}</p>`;
+  };
+  const rateCard = (c, qv) => {
+    keyHandler = null;
+    gradeCard(c, qv); save();
+    const item = queue.shift();
+    if (qv === 0) { lapses++; queue.splice(Math.min(queue.length, 4), 0, item); } else done++;
+    show();
+  };
+
+  // Flip-card review: tap the card (or "Show answer") to see the back, then rate it.
+  function showFlip(c, d, it, isNew) {
+    const meta = [isNew ? '<span class="tag new">NEW</span>' : '', deckId ? '' : esc(d.name)].filter(Boolean).join(' ');
+    render(`
+      ${progressTop(done, done + queue.length, `${queue.length} left`)}
+      ${meta ? `<p class="review-meta">${meta}</p>` : ''}
+      <div class="flash-wrap"><div class="flashcard" id="fc" tabindex="0" role="button" aria-label="Card — tap to flip">
+        <div class="face front">${faceHtml(c, it.prompt, it.promptEs, true)}</div>
+        <div class="face back">${faceHtml(c, it.answer, !it.promptEs, false)}</div>
+      </div></div>
+      <div id="reveal"><button class="btn primary block" type="button" id="flipBtn">Show answer</button>
+      <p class="srs-help">${isTouch() ? 'Or tap the card' : 'Space or tap the card to flip'}</p></div>`);
+    if (state.settings.autoSpeak && it.promptEs) speak(it.prompt);
+    const fc = $('#fc'); let revealed = false;
+    const flip = () => {
+      fc.classList.toggle('flipped');
+      if (revealed) return;
+      revealed = true;
+      if (state.settings.autoSpeak && !it.promptEs) speak(it.answer);
+      $('#reveal').innerHTML = gradeButtons(c);
+      $('.srs-row').onclick = (e) => { const b = e.target.closest('.srs'); if (b) rateCard(c, +b.dataset.q); };
+    };
+    fc.addEventListener('click', (e) => { if (!e.target.closest('button')) flip(); });
+    $('#flipBtn').onclick = flip;
+    keyHandler = (e) => {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (revealed) rateCard(c, 2); else flip(); }
+      else if (revealed && e.key >= '1' && e.key <= '4') { e.preventDefault(); rateCard(c, +e.key - 1); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); flip(); }
+    };
+  }
+
   function show() {
     if (!queue.length) return summary();
     const { c, d } = queue[0];
     const it = { c, ...sides(c) }; const ansEs = !it.promptEs; const isNew = !c.srs.last;
+    if (state.settings.reviewStyle !== 'type') return showFlip(c, d, it, isNew);
     render(`
       ${progressTop(done, done + queue.length, `${queue.length} left`)}
       <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span><div class="q-text" ${langAttr(it.promptEs)}>${esc(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
@@ -1339,6 +1384,7 @@ function settingsView() {
   const installed = isStandalone();
   render(`<div id="settings">
     <section class="panel"><h3>Practice</h3>
+      <div class="field"><span>Daily review</span>${seg('reviewStyle', [['flip', 'Flip cards'], ['type', 'Type answers']], s.reviewStyle)}</div>
       <div class="field"><span>Show me first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>
