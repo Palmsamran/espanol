@@ -46,6 +46,7 @@ const I = {
   alert: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>'),
   flame: svg('<path d="M12 22c4 0 7-3 7-7 0-5-5-7-5-12-3 2-6 6-6 9-1-1-2-2-2-4-1 2-1 4-1 6 0 5 3 8 7 8z"/>'),
   trophy: svg('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0z"/><path d="M17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3"/>'),
+  cloud: svg('<path d="M7 18a4.5 4.5 0 01-.6-8.96A6 6 0 0118 10.5 3.75 3.75 0 0117.5 18z"/>'),
   phone: svg('<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>'),
 };
 
@@ -65,40 +66,63 @@ const STARTER = [
 ];
 
 /* ---------- state ---------- */
+const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
+// Settings that sync between devices (voice and install hint stay per-device).
+const SYNCED_SETTINGS = ['direction', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
 const defaultSettings = () => ({
   direction: 'es-en', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
-  rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false,
+  rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false, updated: 0,
 });
-const defaultStats = () => ({ streak: 0, lastDay: '', history: {} });
+const defaultStats = () => ({ history: {} });
 const freshSrs = () => ({ due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, last: 0 });
 
+// `updated` = when the text/star last changed (used to merge edits from other devices)
 function normalizeCard(c = {}) {
   return {
     id: c.id || uid(), term: String(c.term ?? ''), def: String(c.def ?? ''), starred: !!c.starred,
-    srs: Object.assign(freshSrs(), c.srs || {}),
+    updated: c.updated || 0, srs: Object.assign(freshSrs(), c.srs || {}),
   };
 }
 function normalizeDeck(d = {}) {
   return {
     id: d.id || uid(), name: String(d.name || 'Untitled deck'), created: d.created || Date.now(),
-    bestMatch: d.bestMatch || 0, cards: (Array.isArray(d.cards) ? d.cards : []).map(normalizeCard),
+    updated: d.updated || 0, bestMatch: d.bestMatch || 0,
+    cards: (Array.isArray(d.cards) ? d.cards : []).map(normalizeCard),
   };
 }
+const makeCard = (fields = {}) => normalizeCard({ ...fields, updated: Date.now() });
+const makeDeck = (fields = {}) => normalizeDeck({ ...fields, updated: Date.now() });
+
 function defaultState() {
   return {
     version: 1,
-    decks: [normalizeDeck({ name: 'Starter: Essentials', cards: STARTER.map(([term, def]) => ({ term, def })) })],
+    decks: [normalizeDeck({ id: 'starter', name: 'Starter: Essentials', cards: STARTER.map(([term, def], i) => ({ id: `st${i}`, term, def })) })],
     settings: defaultSettings(), stats: defaultStats(),
+    deleted: { decks: {}, cards: {} }, progressResetAt: 0,
   };
+}
+// Older installs gave the starter deck random ids; give it fixed ids so it merges across devices.
+function migrateStarter(decks) {
+  if (decks.some((d) => d.id === 'starter')) return;
+  const d = decks.find((x) => x.name === 'Starter: Essentials');
+  if (!d || !d.cards.length || !d.cards.every((c) => STARTER_IDX.has(c.term))) return;
+  if (new Set(d.cards.map((c) => c.term)).size !== d.cards.length) return;
+  d.id = 'starter';
+  d.cards.forEach((c) => { c.id = `st${STARTER_IDX.get(c.term)}`; });
 }
 function normalizeState(s) {
+  const decks = Array.isArray(s.decks) ? s.decks.map(normalizeDeck) : [];
+  migrateStarter(decks);
   return {
     version: 1,
-    decks: Array.isArray(s.decks) ? s.decks.map(normalizeDeck) : [],
+    decks,
     settings: Object.assign(defaultSettings(), s.settings || {}),
-    stats: Object.assign(defaultStats(), s.stats || {}),
+    stats: { history: (s.stats && s.stats.history) || {} },
+    deleted: { decks: { ...(s.deleted?.decks || {}) }, cards: { ...(s.deleted?.cards || {}) } },
+    progressResetAt: s.progressResetAt || 0,
   };
 }
+function tombstone(kind, id) { state.deleted[kind][id] = Date.now(); }
 function load() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
@@ -107,12 +131,185 @@ function load() {
   return defaultState();
 }
 let state = load();
-function save() {
+function save(opts = {}) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('Could not save — browser storage is full or blocked'); }
+  if (!opts.silent) scheduleSync();
 }
 let saveTimer;
 const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(save, 300); };
+
+/* ---------- sync (private GitHub gist) ----------
+   Each device keeps a full copy. A sync = download the gist, merge it into
+   this device's data, upload the result if anything differs. Merging is per
+   card: newest text wins, most recent study progress wins, deletions are kept
+   as "tombstones" so they spread too. */
+const SYNC_KEY = 'espanol.sync';
+const GIST_FILE = 'espanol-sync.json';
+function loadSync() { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } }
+let sync = loadSync(); // { token, login, gistId, lastSync } — kept out of backups
+const saveSync = () => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(sync)); } catch { /* ignore */ } };
+const syncState = { busy: false, pending: false, dirty: false, status: '', error: '', timer: null };
+const syncOn = () => !!(sync.token && sync.gistId);
+
+async function gh(path, { token = sync.token, method = 'GET', body } = {}) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method, body, cache: 'no-store',
+    headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  if (!res.ok) { const e = new Error(`GitHub error ${res.status}`); e.status = res.status; throw e; }
+  return res.json();
+}
+async function findGist(token) {
+  for (let page = 1; page <= 10; page++) {
+    const list = await gh(`/gists?per_page=100&page=${page}`, { token });
+    const g = list.find((x) => x.files && x.files[GIST_FILE]);
+    if (g) return g;
+    if (list.length < 100) return null;
+  }
+  return null;
+}
+async function readRemote(id, token = sync.token) {
+  const g = await gh(`/gists/${id}`, { token });
+  const f = g.files && g.files[GIST_FILE];
+  if (!f) return null;
+  if (f.truncated) return (await fetch(f.raw_url, { cache: 'no-store' })).text();
+  return f.content;
+}
+function syncPayload() {
+  const cutoff = Date.now() - 365 * 864e5;
+  for (const kind of ['decks', 'cards']) for (const [id, ts] of Object.entries(state.deleted[kind])) if (ts < cutoff) delete state.deleted[kind][id];
+  const settings = { updated: state.settings.updated || 0 };
+  SYNCED_SETTINGS.forEach((k) => { settings[k] = state.settings[k]; });
+  return JSON.stringify({
+    version: 1, app: 'espanol', decks: state.decks, settings,
+    stats: { history: state.stats.history }, deleted: state.deleted, progressResetAt: state.progressResetAt,
+  });
+}
+
+// Merge another device's data into `state` IN PLACE (open study sessions keep
+// working because card objects are updated, not replaced). Returns true if anything changed.
+function mergeRemote(raw) {
+  const R = normalizeState(raw); const L = state; let changed = false;
+  for (const kind of ['decks', 'cards']) {
+    for (const [id, ts] of Object.entries(R.deleted[kind])) if (!(L.deleted[kind][id] >= ts)) L.deleted[kind][id] = ts;
+  }
+  const resetAt = Math.max(L.progressResetAt, R.progressResetAt);
+  if (resetAt > L.progressResetAt) {
+    L.progressResetAt = resetAt;
+    L.decks.forEach((d) => d.cards.forEach((c) => { if (c.srs.last && c.srs.last <= resetAt) { c.srs = freshSrs(); changed = true; } }));
+  }
+  const delD = L.deleted.decks; const delC = L.deleted.cards;
+  for (const rd of R.decks) {
+    if (delD[rd.id] >= rd.updated) continue;
+    let ld = L.decks.find((d) => d.id === rd.id);
+    if (!ld) { ld = normalizeDeck({ ...rd, cards: [] }); L.decks.push(ld); changed = true; }
+    else if (rd.updated > ld.updated) { ld.name = rd.name; ld.updated = rd.updated; changed = true; }
+    if (rd.bestMatch && (!ld.bestMatch || rd.bestMatch < ld.bestMatch)) { ld.bestMatch = rd.bestMatch; changed = true; }
+    const byId = new Map(ld.cards.map((c) => [c.id, c]));
+    let prev = -1;
+    for (const rc of rd.cards) {
+      if (delC[rc.id] >= rc.updated) continue;
+      const lc = byId.get(rc.id);
+      if (!lc) {
+        const nc = normalizeCard(rc);
+        if (nc.srs.last && nc.srs.last <= resetAt) nc.srs = freshSrs();
+        ld.cards.splice(prev + 1, 0, nc); byId.set(nc.id, nc); prev += 1; changed = true;
+      } else {
+        if (rc.updated > lc.updated) { lc.term = rc.term; lc.def = rc.def; lc.starred = rc.starred; lc.updated = rc.updated; changed = true; }
+        if (rc.srs.last > lc.srs.last && rc.srs.last > resetAt) { lc.srs = { ...rc.srs }; changed = true; }
+        prev = ld.cards.indexOf(lc);
+      }
+    }
+  }
+  const count = () => L.decks.length + L.decks.reduce((n, d) => n + d.cards.length, 0);
+  const before = count();
+  L.decks = L.decks.filter((d) => !(delD[d.id] >= d.updated));
+  L.decks.forEach((d) => { d.cards = d.cards.filter((c) => !(delC[c.id] >= c.updated)); });
+  if (count() !== before) changed = true;
+  if (R.settings.updated > (L.settings.updated || 0)) {
+    SYNCED_SETTINGS.forEach((k) => { L.settings[k] = R.settings[k]; });
+    L.settings.updated = R.settings.updated; applyTheme(); changed = true;
+  }
+  for (const [k, h] of Object.entries(R.stats.history)) {
+    const lh = L.stats.history[k];
+    if (!lh) { L.stats.history[k] = { reviews: h.reviews || 0, newCards: h.newCards || 0 }; changed = true; continue; }
+    for (const f of ['reviews', 'newCards']) if ((h[f] || 0) > (lh[f] || 0)) { lh[f] = h[f]; changed = true; }
+  }
+  return changed;
+}
+
+function scheduleSync(delay = 8000) {
+  if (!syncOn()) return;
+  syncState.dirty = true;
+  clearTimeout(syncState.timer);
+  syncState.timer = setTimeout(runSync, delay);
+}
+function setSyncStatus(s) { syncState.status = s; updateSyncUI(); }
+async function runSync() {
+  if (!syncOn()) return;
+  if (syncState.busy) { syncState.pending = true; return; }
+  if (!navigator.onLine) { setSyncStatus('offline'); return; }
+  syncState.busy = true; syncState.dirty = false; clearTimeout(syncState.timer);
+  setSyncStatus('syncing');
+  try {
+    const text = await readRemote(sync.gistId);
+    let changed = false;
+    if (text) { try { changed = mergeRemote(JSON.parse(text)); } catch { /* unreadable remote: overwrite it */ } }
+    if (changed) save({ silent: true });
+    const out = syncPayload();
+    if (out !== text) await gh(`/gists/${sync.gistId}`, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: out } } }) });
+    sync.lastSync = Date.now(); saveSync();
+    syncState.error = ''; setSyncStatus('ok');
+    if (changed) refreshAfterSync();
+  } catch (e) {
+    syncState.error = e.status === 401 ? 'auth' : e.status === 404 ? 'missing' : 'network';
+    setSyncStatus('error');
+  } finally {
+    syncState.busy = false;
+    if (syncState.pending) { syncState.pending = false; scheduleSync(1500); }
+  }
+}
+// Re-draw list screens when another device's changes arrive (study screens are left alone).
+function refreshAfterSync() {
+  const path = (location.hash || '#/').split('?')[0];
+  if (path === '#/' || path === '#' || /^#\/deck\/\w+$/.test(path)) { const y = window.scrollY; route(); window.scrollTo(0, y); }
+}
+async function connectSync(token) {
+  const user = await gh('/user', { token });
+  const found = await findGist(token);
+  if (found) {
+    let remote = null;
+    try { remote = JSON.parse(await readRemote(found.id, token)); } catch { /* treat as empty */ }
+    ui.syncPending = { token, login: user.login, gistId: found.id, remote };
+    if (!remote || !Array.isArray(remote.decks)) finishConnect('combine');
+    return;
+  }
+  const g = await gh('/gists', {
+    token, method: 'POST',
+    body: JSON.stringify({ description: 'Español app — synced flashcards', public: false, files: { [GIST_FILE]: { content: syncPayload() } } }),
+  });
+  sync = { token, login: user.login, gistId: g.id, lastSync: Date.now() }; saveSync();
+  syncState.status = 'ok'; toast('Sync is on');
+}
+function finishConnect(mode) {
+  const p = ui.syncPending; ui.syncPending = null; if (!p) return;
+  if (mode === 'replace' && p.remote) {
+    const keep = { voiceName: state.settings.voiceName, hideInstallHint: state.settings.hideInstallHint };
+    state = normalizeState(p.remote); Object.assign(state.settings, keep);
+    applyTheme(); save({ silent: true });
+  }
+  sync = { token: p.token, login: p.login, gistId: p.gistId, lastSync: 0 }; saveSync();
+  updateSyncUI();
+  runSync().then(() => { if (syncState.status === 'ok') toast('Sync is on'); });
+}
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(t).toLocaleDateString();
+}
 
 const getDeck = (id) => {
   const d = state.decks.find((x) => x.id === id);
@@ -166,17 +363,16 @@ function touchStats(wasNew = false) {
   const st = state.stats; const k = dayKey();
   const h = st.history[k] || (st.history[k] = { reviews: 0, newCards: 0 });
   h.reviews += 1; if (wasNew) h.newCards += 1;
-  if (st.lastDay !== k) {
-    const y = dayKey(addDays(startOfDay(), -1));
-    st.streak = st.lastDay === y ? st.streak + 1 : 1;
-    st.lastDay = k;
-    const keys = Object.keys(st.history).sort();
-    keys.slice(0, Math.max(0, keys.length - 90)).forEach((x) => delete st.history[x]);
-  }
+  const keys = Object.keys(st.history).sort();
+  keys.slice(0, Math.max(0, keys.length - 400)).forEach((x) => delete st.history[x]);
 }
+// Streak = consecutive days with practice, ending today (or yesterday if not yet today).
 function currentStreak() {
-  const st = state.stats; const k = dayKey(); const y = dayKey(addDays(startOfDay(), -1));
-  return st.lastDay === k || st.lastDay === y ? st.streak : 0;
+  const hist = state.stats.history;
+  let t = startOfDay(); let n = 0;
+  if (!hist[dayKey(t)]?.reviews) t = addDays(t, -1);
+  while (hist[dayKey(t)]?.reviews) { n++; t = addDays(t, -1); }
+  return n;
 }
 const newIntroducedToday = () => state.stats.history[dayKey()]?.newCards || 0;
 
@@ -299,7 +495,7 @@ document.addEventListener('click', (e) => {
     e.preventDefault();
     const c = findCard(star.dataset.star);
     if (c) {
-      c.starred = !c.starred; save();
+      c.starred = !c.starred; c.updated = Date.now(); save();
       $$(`[data-star="${c.id}"]`).forEach((b) => { b.classList.toggle('on', c.starred); b.setAttribute('aria-pressed', c.starred); });
     }
     return;
@@ -404,9 +600,10 @@ function home() {
       <div class="row gap"><a class="btn sm ghost" href="#/import">${I.upload} Import</a><button class="btn sm" id="newDeck">${I.plus} New</button></div>
     </div>
     <div class="deck-list">${state.decks.map(deckTile).join('') || '<p class="empty">No decks yet. Create one or import from Quizlet.</p>'}</div>
+    <p class="sync-line" id="syncLine">${syncLineHtml()}</p>
   `);
   $('#newDeck').onclick = () => {
-    const d = normalizeDeck({ name: 'New deck', cards: [{}] });
+    const d = makeDeck({ name: 'New deck', cards: [makeCard()] });
     state.decks.unshift(d); save(); location.hash = `#/deck/${d.id}/edit`;
   };
   const hh = $('#hideHint');
@@ -456,14 +653,14 @@ function deckView(id) {
   };
   $('#delDeck').onclick = () => {
     if (!confirm(`Delete “${d.name}” and its ${plural(d.cards.length, 'card')}? This can't be undone.`)) return;
-    state.decks = state.decks.filter((x) => x.id !== id); save(); toast('Deck deleted'); location.hash = '#/';
+    tombstone('decks', id); state.decks = state.decks.filter((x) => x.id !== id); save(); toast('Deck deleted'); location.hash = '#/';
   };
 }
 
 function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
-  if (!d.cards.length) d.cards.push(normalizeCard());
+  if (!d.cards.length) d.cards.push(makeCard());
   const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><input class="er-term" lang="es" value="${esc(c.term)}" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="next"></label><label><span>English</span><input class="er-def" value="${esc(c.def)}" autocapitalize="off" autocomplete="off" enterkeyhint="next"></label></div><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div>`;
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
@@ -475,20 +672,21 @@ function deckEdit(id) {
   const rows = $('#rows');
   const renumber = () => $$('.er-num', rows).forEach((n, i) => { n.textContent = i + 1; });
   const addRow = () => {
-    const c = normalizeCard(); d.cards.push(c);
+    const c = makeCard(); d.cards.push(c);
     rows.insertAdjacentHTML('beforeend', row(c, d.cards.length - 1));
     rows.lastElementChild.querySelector('.er-term').focus();
   };
-  $('#deckName').oninput = (e) => { d.name = e.target.value.trim() || 'Untitled deck'; saveSoon(); };
+  $('#deckName').oninput = (e) => { d.name = e.target.value.trim() || 'Untitled deck'; d.updated = Date.now(); saveSoon(); };
   rows.addEventListener('input', (e) => {
     const r = e.target.closest('.edit-row'); const c = r && d.cards.find((x) => x.id === r.dataset.id); if (!c) return;
     if (e.target.classList.contains('er-term')) c.term = e.target.value; else c.def = e.target.value;
+    c.updated = Date.now();
     saveSoon();
   });
   rows.addEventListener('click', (e) => {
     const b = e.target.closest('.er-del'); if (!b) return;
     const r = b.closest('.edit-row');
-    d.cards = d.cards.filter((x) => x.id !== r.dataset.id); r.remove(); renumber(); saveSoon();
+    tombstone('cards', r.dataset.id); d.cards = d.cards.filter((x) => x.id !== r.dataset.id); r.remove(); renumber(); saveSoon();
   });
   rows.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -500,11 +698,12 @@ function deckEdit(id) {
   });
   $('#addRow').onclick = addRow;
   $('#swapAll').onclick = () => {
-    d.cards.forEach((c) => { [c.term, c.def] = [c.def, c.term]; });
+    d.cards.forEach((c) => { [c.term, c.def] = [c.def, c.term]; c.updated = Date.now(); });
     save(); toast('Swapped Spanish and English'); deckEdit(id);
   };
   onCleanup(() => {
     clearTimeout(saveTimer);
+    d.cards.filter((c) => !c.term.trim() && !c.def.trim()).forEach((c) => tombstone('cards', c.id));
     d.cards = d.cards.filter((c) => c.term.trim() || c.def.trim());
     save();
   });
@@ -589,11 +788,11 @@ function importView(deckId) {
   $('#impGo').onclick = () => {
     const cards = update(); if (!cards.length) return;
     let deck = target;
-    if (!deck) { deck = normalizeDeck({ name: $('#impName').value.trim() || 'Imported deck' }); state.decks.unshift(deck); }
+    if (!deck) { deck = makeDeck({ name: $('#impName').value.trim() || 'Imported deck' }); state.decks.unshift(deck); }
     deck.cards = deck.cards.filter((c) => c.term.trim() || c.def.trim());
     const key = (c) => `${c.term}\u0000${c.def}`.toLowerCase();
     const seen = new Set(deck.cards.map(key)); let added = 0;
-    for (const c of cards) { if (seen.has(key(c))) continue; seen.add(key(c)); deck.cards.push(normalizeCard(c)); added++; }
+    for (const c of cards) { if (seen.has(key(c))) continue; seen.add(key(c)); deck.cards.push(makeCard(c)); added++; }
     save();
     toast(added === cards.length ? `Added ${plural(added, 'card')}` : `Added ${added} — ${cards.length - added} were already in the deck`);
     location.hash = `#/deck/${deck.id}`;
@@ -1038,6 +1237,100 @@ function reviewView(q) {
   show();
 }
 
+/* ---------- sync UI ---------- */
+const TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=gist&description=Espa%C3%B1ol%20app%20sync';
+function syncStatusHtml() {
+  const st = syncState.status;
+  if (st === 'syncing') return `<div class="sync-status">${I.cloud} Syncing…</div>`;
+  if (st === 'offline') return `<div class="sync-status warn">${I.cloud} Offline — will sync when you’re back online</div>`;
+  if (st === 'error') {
+    const msg = syncState.error === 'auth' ? 'GitHub rejected the token (it may have expired). Disconnect, then connect with a new token.'
+      : syncState.error === 'missing' ? 'The synced copy on GitHub was deleted. Disconnect, then connect again to start fresh.'
+        : 'Couldn’t reach GitHub. It will try again automatically.';
+    return `<div class="sync-status bad">${I.alert} ${msg}</div>`;
+  }
+  return `<div class="sync-status good">${I.check} ${sync.lastSync ? `Synced ${ago(sync.lastSync)}` : 'Connected'}</div>`;
+}
+function syncPanelHtml() {
+  const p = ui.syncPending;
+  if (p) {
+    const decks = p.remote.decks.length;
+    const cards = p.remote.decks.reduce((n, d) => n + (d.cards?.length || 0), 0);
+    return `<h3>Sync</h3>
+      <p>Your GitHub account already has synced data: <b>${plural(decks, 'deck')}, ${plural(cards, 'card')}</b>.</p>
+      <p class="muted">What should happen to the cards on this device?</p>
+      <div class="stack">
+        <button class="btn primary block" type="button" data-sync="combine">Combine both</button>
+        <button class="btn block" type="button" data-sync="replace">Use the synced data, discard this device’s</button>
+        <button class="btn ghost block" type="button" data-sync="cancel">Cancel</button>
+      </div>`;
+  }
+  if (!syncOn()) {
+    return `<h3>Sync between devices</h3>
+      <p class="muted">Keep your cards and progress the same on your phone and computer. Everything is stored in a private gist on your GitHub account.</p>
+      <ol class="install">
+        <li><a href="${TOKEN_URL}" target="_blank" rel="noopener">Create a GitHub token</a>. “gist” is already ticked. Choose an expiration (or “No expiration”), click <b>Generate token</b>, and copy it.</li>
+        <li>Paste it here, then do the same on your other device with the same token.</li>
+      </ol>
+      <form class="answer-form" id="syncForm" autocomplete="off">
+        <input id="syncToken" type="password" placeholder="Paste token (ghp_…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button class="btn primary" type="submit">Connect</button>
+      </form>
+      ${ui.syncError ? `<div class="sync-status bad">${I.alert} ${ui.syncError}</div>` : ''}
+      <p class="muted small">Tip: save the token in your password manager so it’s easy to paste on your phone. It can only read and write gists, nothing else on your account.</p>`;
+  }
+  return `<h3>Sync</h3>
+    ${syncStatusHtml()}
+    <p class="muted small">Connected to GitHub as <b>${esc(sync.login || '')}</b>. Changes sync automatically when you open the app and a few seconds after you study.</p>
+    <div class="stack">
+      <button class="btn block" type="button" data-sync="now">${I.cloud} Sync now</button>
+      <button class="btn block ghost" type="button" data-sync="copy">${I.copy} Copy token for another device</button>
+      <button class="btn block ghost danger" type="button" data-sync="disconnect">Turn off sync</button>
+    </div>`;
+}
+function syncLineHtml() {
+  if (!syncOn()) return '';
+  const st = syncState.status;
+  if (st === 'syncing') return `${I.cloud} Syncing…`;
+  if (st === 'error') return `${I.alert} Sync problem — <a href="#/settings">see Settings</a>`;
+  if (st === 'offline') return `${I.cloud} Offline — will sync later`;
+  return sync.lastSync ? `${I.check} Synced ${ago(sync.lastSync)}` : '';
+}
+function updateSyncUI() {
+  const p = $('#syncPanel'); if (p) p.innerHTML = syncPanelHtml();
+  const l = $('#syncLine'); if (l) l.innerHTML = syncLineHtml();
+}
+function wireSyncPanel(panel) {
+  panel.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const inp = $('#syncToken', panel); const btn = $('button[type=submit]', panel);
+    const tok = inp.value.trim(); if (!tok) { inp.focus(); return; }
+    btn.disabled = true; btn.textContent = 'Connecting…'; ui.syncError = '';
+    try { await connectSync(tok); }
+    catch (err) {
+      ui.syncError = err.status === 401 ? 'GitHub didn’t accept that token. Check you copied all of it.'
+        : err.status === 403 || err.status === 404 ? 'That token is missing the “gist” permission.'
+          : 'Couldn’t reach GitHub. Check your connection and try again.';
+    }
+    updateSyncUI();
+  });
+  panel.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-sync]'); if (!b) return;
+    const a = b.dataset.sync;
+    if (a === 'combine' || a === 'replace') {
+      if (a === 'replace' && !confirm('Replace all cards and progress on this device with the synced data?')) return;
+      finishConnect(a);
+    } else if (a === 'cancel') { ui.syncPending = null; updateSyncUI(); }
+    else if (a === 'now') runSync();
+    else if (a === 'copy') {
+      try { await navigator.clipboard.writeText(sync.token); toast('Token copied — paste it in Settings on your other device'); } catch { toast('Copy failed'); }
+    } else if (a === 'disconnect') {
+      if (!confirm('Turn off sync on this device? Your cards stay here, and the synced copy stays on GitHub.')) return;
+      sync = {}; saveSync(); syncState.status = ''; updateSyncUI(); toast('Sync turned off');
+    }
+  });
+}
+
 /* ---------- views: settings ---------- */
 function settingsView() {
   setHeader('Settings', '#/');
@@ -1058,8 +1351,9 @@ function settingsView() {
       <button class="btn sm ghost" type="button" id="testVoice">${I.speaker} Test voice</button>
     </section>` : ''}
     <section class="panel"><h3>Appearance</h3>${seg('theme', [['system', 'Auto'], ['light', 'Light'], ['dark', 'Dark']], s.theme)}</section>
-    <section class="panel"><h3>Your data</h3>
-      <p class="muted">Your cards and progress are saved on this device only. To move them to your phone or computer, save a backup file here and restore it there.</p>
+    <section class="panel" id="syncPanel">${syncPanelHtml()}</section>
+    <section class="panel"><h3>Backup</h3>
+      <p class="muted">Save a copy of all your cards and progress as a file, or restore one.</p>
       <div class="stack">
         <button class="btn block" type="button" id="backup">${I.download} Save backup file</button>
         <label class="btn block ghost file-btn">${I.upload} Restore from backup<input type="file" id="restore" accept=".json,application/json" hidden></label>
@@ -1076,12 +1370,14 @@ function settingsView() {
     <p class="muted center small">Español · works offline</p>
   </div>`);
   const root = $('#settings');
+  wireSyncPanel($('#syncPanel'));
   root.addEventListener('change', (e) => {
-    const t = e.target; if (!t.name) return;
+    const t = e.target; if (!t.name || t.closest('#syncPanel')) return;
     if (t.type === 'checkbox') s[t.name] = t.checked;
     else if (t.name === 'newPerDay') { s.newPerDay = Math.max(0, Math.min(500, parseInt(t.value, 10) || 0)); t.value = s.newPerDay; }
     else if (t.name === 'rate') s.rate = +t.value;
     else s[t.name] = t.value;
+    if (SYNCED_SETTINGS.includes(t.name)) s.updated = Date.now();
     if (t.name === 'theme') applyTheme();
     if (t.name === 'voiceLang') { s.voiceName = ''; save(); settingsView(); return; }
     save();
@@ -1120,6 +1416,7 @@ function settingsView() {
   };
   $('#resetProg').onclick = () => {
     if (!confirm('Reset learning progress for every card? Your cards and decks stay.')) return;
+    state.progressResetAt = Date.now();
     state.decks.forEach((d) => { d.bestMatch = 0; d.cards.forEach((c) => { c.srs = freshSrs(); }); });
     state.stats = defaultStats(); save(); toast('Progress reset');
   };
@@ -1130,7 +1427,12 @@ function settingsView() {
 /* ---------- boot ---------- */
 applyTheme();
 route();
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { save({ silent: true }); if (syncState.dirty) runSync(); }
+  else if (syncOn() && Date.now() - (sync.lastSync || 0) > 30000) runSync();
+});
+window.addEventListener('online', () => { if (syncOn()) runSync(); });
+if (syncOn()) runSync();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

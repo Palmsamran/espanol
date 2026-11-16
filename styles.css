@@ -443,6 +443,17 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
 .install li { margin: 6px 0; }
 output { color: var(--text); font-weight: 700; }
 
+.sync-status { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 10px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); font-size: 14px; font-weight: 600; }
+.sync-status svg { width: 18px; height: 18px; margin-top: 1px; }
+.sync-status.good { background: var(--good-soft); }
+.sync-status.good svg { color: var(--good); }
+.sync-status.warn { background: var(--warn-soft); }
+.sync-status.bad { background: var(--bad-soft); font-weight: 500; }
+.sync-status.bad svg { color: var(--bad); }
+#syncPanel .answer-form { margin: 8px 0 10px; }
+.sync-line { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 20px; margin: 18px 0 0; font-size: 13px; color: var(--muted); }
+.sync-line svg { width: 15px; height: 15px; }
+
 .empty-state { display: grid; justify-items: center; gap: 12px; padding: 40px 0; text-align: center; }
 .empty-state p { margin: 0; max-width: 340px; }
 

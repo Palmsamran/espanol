@@ -21,9 +21,16 @@ There's also text-to-speech in Spain, Mexico or US Spanish, starred cards, an ac
 - `manifest.webmanifest`, `icons/`: what makes it installable
 - `serve.js`: a tiny local server for testing (`node serve.js`, then open http://localhost:8765)
 
-## Your data
+## Your data and sync
 
-Cards and progress are saved in the browser on each device. To move them between devices, use **Settings → Save backup file** on one and **Restore from backup** on the other.
+Cards and progress are saved in the browser on each device. To keep your phone and computer in step, turn on **Settings → Sync between devices**:
+
+1. Create a GitHub token that has only the `gist` scope. The link in Settings opens GitHub's token page with that scope already ticked.
+2. Paste the token on each device. The first device creates a private ("secret") gist called `espanol-sync.json`. Other devices find that gist and ask whether to combine their data with it or replace their own.
+
+It syncs when the app opens, when you switch back to it, and a few seconds after you study. It merges card by card: the newest edit to a card's text wins, the most recent study progress wins, and deletions sync too. The token is stored only on each device and is never included in backup files.
+
+**Settings → Save backup file / Restore from backup** still work if you just want a copy of your data as a file.
 
 ## Putting it online (needed to install on a phone)
 
