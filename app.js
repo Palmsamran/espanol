@@ -46,6 +46,7 @@ const I = {
   download: svg('<path d="M12 4v12M7 11l5 5 5-5M4 20h16"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),
   trash: svg('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>'),
   image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>'),
   shuffle: svg('<path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
   swap: svg('<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>'),
@@ -391,6 +392,66 @@ async function attachPhoto(card, file) {
   if (old) imgDel(old);
   navigator.storage?.persist?.().catch(() => {});
   return true;
+}
+// Picture search (Openverse: free, openly licensed images; no account or key needed).
+// The default search is the card's English word without "to"/"the" and extra meanings.
+function searchWord(c) {
+  const w = plain(c.def).replace(/\([^)]*\)/g, ' ').split(/[/;,]/)[0].replace(/^\s*(to|the|a|an)\s+/i, '').trim();
+  return w || plain(c.term).trim();
+}
+function photoSearch(card, onPick) {
+  const dlg = document.createElement('dialog'); dlg.className = 'pic-search';
+  dlg.innerHTML = `
+    <div class="ps-top">
+      <form class="ps-form"><input type="search" class="ps-q" value="${esc(searchWord(card))}" placeholder="Search pictures" aria-label="Search pictures" enterkeyhint="search" autocomplete="off"><button class="btn primary" type="submit">${I.search}<span class="sr">Search</span></button></form>
+      <button type="button" class="icon-btn ps-close" aria-label="Close">${I.x}</button>
+    </div>
+    <div class="ps-body"><div class="ps-grid"></div><p class="ps-msg muted"></p><button type="button" class="btn block ghost ps-more" hidden>More pictures</button></div>
+    <p class="ps-credit">Openly licensed pictures from <a href="https://openverse.org" target="_blank" rel="noopener">Openverse</a></p>`;
+  document.body.appendChild(dlg);
+  const grid = $('.ps-grid', dlg); const msg = $('.ps-msg', dlg); const more = $('.ps-more', dlg); const q = $('.ps-q', dlg);
+  let results = []; let page = 1; let query = ''; let gen = 0; let busy = false;
+  const close = () => dlg.close();
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.addEventListener('click', (e) => { if (e.target === dlg) close(); });
+  $('.ps-close', dlg).onclick = close;
+  async function run(p) {
+    const my = ++gen; page = p;
+    if (p === 1) { results = []; grid.innerHTML = ''; }
+    more.hidden = true; msg.textContent = 'Searching…';
+    try {
+      const res = await fetch(`https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=20&page=${p}`);
+      if (my !== gen) return;
+      if (res.status === 429) { msg.textContent = 'Too many searches for now — try again in a minute.'; return; }
+      if (!res.ok) throw new Error(res.status);
+      const data = await res.json(); if (my !== gen) return;
+      const list = (data.results || []).filter((r) => r.thumbnail);
+      const start = results.length; results.push(...list);
+      grid.insertAdjacentHTML('beforeend', list.map((r, k) => `<button type="button" class="ps-item" data-k="${start + k}" title="${esc(r.title || '')}${r.creator ? ` — ${esc(r.creator)}` : ''}"><img src="${esc(r.thumbnail)}" alt="${esc(r.title || 'Picture')}" loading="lazy"></button>`).join(''));
+      $$('img', grid).forEach((im) => { im.onerror = () => im.closest('.ps-item')?.remove(); });
+      msg.textContent = results.length ? '' : `No pictures found for “${query}”. Try another word.`;
+      more.hidden = !(data.page_count > p) || !list.length;
+    } catch {
+      if (my === gen) msg.textContent = navigator.onLine ? 'Search isn’t working right now. You can still add your own photo.' : 'You’re offline. Connect to the internet to search pictures.';
+    }
+  }
+  $('.ps-form', dlg).onsubmit = (e) => { e.preventDefault(); query = q.value.trim(); if (query) { q.blur(); run(1); } };
+  more.onclick = () => run(page + 1);
+  grid.onclick = async (e) => {
+    const b = e.target.closest('.ps-item'); if (!b || busy) return;
+    const r = results[+b.dataset.k]; busy = true; b.classList.add('loading');
+    try {
+      let blob = null;
+      for (const u of [r.thumbnail, r.url]) {
+        try { const res = await fetch(u); if (res.ok) { const bl = await res.blob(); if (/^image\//.test(bl.type)) { blob = bl; break; } } } catch { /* try the next one */ }
+      }
+      if (!blob) { toast('Couldn’t get that picture — try another'); return; }
+      if (await attachPhoto(card, new File([blob], 'picture', { type: blob.type }))) { close(); onPick(); toast('Photo added'); }
+    } finally { busy = false; b.classList.remove('loading'); }
+  };
+  dlg.showModal();
+  query = q.value.trim();
+  if (query) run(1); else q.focus();
 }
 function removePhoto(card) {
   if (!card.img) return;
@@ -870,7 +931,7 @@ function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add photo" title="Add photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
   const setRowImg = (r, c) => { r.querySelector('.er-img').outerHTML = erImg(c); };
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
@@ -902,6 +963,8 @@ function deckEdit(id) {
     if (c && f && await attachPhoto(c, f)) setRowImg(r, c);
   });
   rows.addEventListener('click', (e) => {
+    const sb = e.target.closest('.er-search');
+    if (sb) { const [r, c] = rowCard(sb) || []; if (c) photoSearch(c, () => setRowImg(r, c)); return; }
     const rm = e.target.closest('.er-img-del');
     if (rm) { const [r, c] = rowCard(rm) || []; if (c) { removePhoto(c); setRowImg(r, c); } return; }
     const b = e.target.closest('.er-del'); if (!b) return;
