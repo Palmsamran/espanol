@@ -926,12 +926,58 @@ function deckView(id) {
   };
 }
 
-/* ---------- spelling check ---------- */
-// Uses LanguageTool's free public service. Only the card's words are sent, and only when checking.
-const spellCache = new Map(); // `${lang}|${text}` -> issues [{at, len, word, reps}]
+/* ---------- spelling & grammar check ---------- */
+// Uses LanguageTool's free public service (only the card's words are sent, and only when checking),
+// plus a few built-in rules for common learner mistakes it misses, which also work offline.
+const spellCache = new Map(); // `${lang}|${text}` -> issues [{at, len, word, reps, kind, why}]
+const spellSeen = new Set(); // texts that have been checked at least once (shows the built-in rules even offline)
 const SPELL_LANG = { term: 'es', def: 'en-US' };
 const spellKey = (f, t) => `${SPELL_LANG[f]}|${t}`;
 const isIgnored = (w) => (state.settings.spellIgnore || []).includes(w.trim().toLowerCase());
+function issueKind(m) {
+  const c = m.rule?.category?.id || ''; const t = m.rule?.issueType; const id = m.rule?.id || '';
+  if (t === 'whitespace') return 'Extra space';
+  if (c === 'DIACRITICS' || /TILDE|ACCENT/.test(id)) return 'Accent';
+  if (c === 'TYPOS') return 'Spelling';
+  if (/AGREEMENT/.test(c + id)) return 'Agreement';
+  if (c === 'CASING') return 'Capital letter';
+  if (c === 'CONFUSED_WORDS') return 'Word mix-up';
+  if (t === 'misspelling') return 'Spelling';
+  return 'Grammar';
+}
+function issueWhy(kind, lang, m) {
+  if (kind === 'Agreement') return 'The words don’t match in gender (el/la) or number (singular/plural).';
+  if (kind === 'Accent') return 'Check the accent mark.';
+  if (kind === 'Capital letter') return lang === 'es' ? 'Spanish doesn’t capitalize days, months or languages.' : 'Check the capital letter.';
+  if (kind === 'Grammar' || kind === 'Word mix-up') return lang === 'es' ? 'Possible grammar mistake.' : (m.shortMessage || m.message || '');
+  return '';
+}
+// Built-in rules for common learner mistakes (Spanish side).
+const FEM_O = new Set(['mano', 'foto', 'moto', 'radio', 'modelo', 'soprano', 'testigo', 'piloto', 'libido', 'polio', 'dinamo', 'seo', 'virago']);
+const DET_FLIP = { la: 'el', una: 'un', esta: 'este', esa: 'ese', aquella: 'aquel', el: 'la', un: 'una', este: 'esta', ese: 'esa', aquel: 'aquella' };
+const sameCase = (from, to) => (from[0] === from[0].toUpperCase() ? to[0].toUpperCase() + to.slice(1) : to);
+function learnerIssues(f, t) {
+  if (f !== 'term') return [];
+  const out = [];
+  // "hacen veinte grados" → "hace": weather and temperature use the singular "hace".
+  for (const m of t.matchAll(/(?<!\p{L})hacen(?=(?:\s+\S+){0,2}?\s+(?:grados|frío|frio|calor|sol|viento|fresco|tiempo)(?!\p{L}))/giu)) {
+    out.push({ at: m.index, len: m[0].length, word: m[0], reps: [sameCase(m[0], 'hace')], kind: 'Grammar', why: 'Weather uses “hace” (singular): hace calor, hace 20 grados.' });
+  }
+  // "la presupuesto" → "el presupuesto": nouns ending in -o are almost always masculine.
+  for (const m of t.matchAll(/(?<!\p{L})(la|una|esta|esa|aquella)\s+(\p{L}+o)(?!\p{L})/giu)) {
+    const det = m[1]; const noun = m[2];
+    if (FEM_O.has(noun.toLowerCase())) continue;
+    // "la" can also mean "her/it" before a verb (la veo), so only flag a card that is just "la + word".
+    if (det.toLowerCase() === 'la' && t.trim().toLowerCase() !== m[0].toLowerCase()) continue;
+    out.push({ at: m.index, len: m[0].length, word: m[0], reps: [`${sameCase(det, DET_FLIP[det.toLowerCase()])} ${noun}`], kind: 'Gender', why: `“${noun}” ends in -o, so it’s masculine.` });
+  }
+  // "el canción" → "la canción": -ción, -sión, -dad, -tad, -tud, -umbre nouns are feminine.
+  for (const m of t.matchAll(/(?<!\p{L})(el|un|este|ese|aquel)\s+(\p{L}+(?:ción|sión|dad|tad|tud|umbre))(?!\p{L})/giu)) {
+    const det = m[1]; const noun = m[2];
+    out.push({ at: m.index, len: m[0].length, word: m[0], reps: [`${sameCase(det, DET_FLIP[det.toLowerCase()])} ${noun}`], kind: 'Gender', why: `Words ending in -${noun.match(/(ción|sión|dad|tad|tud|umbre)$/i)[1]} are feminine.` });
+  }
+  return out;
+}
 async function spellRequest(lang, batch) {
   const text = batch.join('\n\n');
   const body = new URLSearchParams({ text, language: lang, disabledRules: 'UPPERCASE_SENTENCE_START,PUNCTUATION_PARAGRAPH_END' });
@@ -944,17 +990,20 @@ async function spellRequest(lang, batch) {
   batch.forEach((t) => { starts.push(pos); pos += t.length + 2; });
   for (const m of data.matches || []) {
     const type = m.rule?.issueType;
-    if (!['misspelling', 'whitespace', 'typographical'].includes(type)) continue;
+    if (!['misspelling', 'whitespace', 'typographical', 'grammar', 'inconsistency'].includes(type)) continue;
+    if (['STYLE', 'REDUNDANCY', 'TYPOGRAPHY'].includes(m.rule?.category?.id) && type !== 'whitespace') continue;
     let k = starts.length - 1; while (k > 0 && starts[k] > m.offset) k--;
     const at = m.offset - starts[k];
     if (at < 0 || at + m.length > batch[k].length) continue;
     const word = batch[k].substr(at, m.length);
-    found[k].push({ at, len: m.length, word, reps: (m.replacements || []).slice(0, 4).map((r) => r.value).filter((v) => v !== word) });
+    const kind = issueKind(m);
+    found[k].push({ at, len: m.length, word, kind, why: issueWhy(kind, lang, m), reps: (m.replacements || []).slice(0, 4).map((r) => r.value).filter((v) => v !== word) });
   }
   batch.forEach((t, k) => spellCache.set(`${lang}|${t}`, found[k]));
 }
 // texts: [{f: 'term'|'def', t: plain text}] — fills the cache for anything not checked yet.
 async function spellCheck(items) {
+  items.forEach((x) => { if (x.t.trim()) spellSeen.add(spellKey(x.f, x.t)); });
   for (const f of ['term', 'def']) {
     const lang = SPELL_LANG[f];
     const todo = [...new Set(items.filter((x) => x.f === f && x.t.trim() && !spellCache.has(spellKey(f, x.t))).map((x) => x.t))];
@@ -966,7 +1015,13 @@ async function spellCheck(items) {
     if (batch.length) await spellRequest(lang, batch);
   }
 }
-const spellIssues = (f, raw) => (spellCache.get(spellKey(f, plain(raw))) || []).filter((x) => !(x.word.trim() && isIgnored(x.word)));
+function spellIssues(f, raw) {
+  const t = plain(raw); const key = spellKey(f, t);
+  if (!spellSeen.has(key)) return [];
+  const lt = spellCache.get(key) || [];
+  const extra = learnerIssues(f, t).filter((x) => !lt.some((y) => y.at < x.at + x.len && x.at < y.at + y.len));
+  return [...lt, ...extra].sort((a, b) => a.at - b.at).filter((x) => !(x.word.trim() && isIgnored(x.word)));
+}
 // Replace characters at a position in the plain text, keeping the formatting tags around it.
 const TAG_AT = new RegExp(`^(?:${FMT_RE.source})`, 'i');
 function replacePlain(raw, at, len, v) {
@@ -982,7 +1037,7 @@ function issuesHtml(c) {
       const space = !x.word.trim();
       const fixes = space ? [`<button type="button" class="chip fix" data-f="${f}" data-at="${x.at}" data-len="${x.len}" data-v=" ">Fix</button>`]
         : x.reps.map((v) => `<button type="button" class="chip fix" data-f="${f}" data-at="${x.at}" data-len="${x.len}" data-v="${esc(v)}" ${f === 'term' ? 'lang="es"' : ''}>${esc(v)}</button>`);
-      out.push(`<div class="issue">${I.alert}<span class="iss-word" ${f === 'term' ? 'lang="es"' : ''}>${space ? 'Extra space' : `<s>${esc(x.word)}</s>`}</span>${fixes.length ? `<span class="iss-arrow">→</span>${fixes.join('')}` : '<span class="muted small">no suggestions</span>'}${space ? '' : `<button type="button" class="chip ghost ign" data-w="${esc(x.word)}">Ignore</button>`}</div>`);
+      out.push(`<div class="issue">${I.alert}${space ? '' : `<span class="iss-kind">${esc(x.kind || 'Spelling')}</span>`}<span class="iss-word" ${f === 'term' ? 'lang="es"' : ''}>${space ? 'Extra space' : `<s>${esc(x.word)}</s>`}</span>${fixes.length ? `<span class="iss-arrow">→</span>${fixes.join('')}` : '<span class="muted small">no suggestions</span>'}${space ? '' : `<button type="button" class="chip ghost ign" data-w="${esc(x.word)}">Ignore</button>`}${x.why ? `<span class="iss-why">${esc(x.why)}</span>` : ''}</div>`);
     }
   }
   return out.join('');
@@ -1001,7 +1056,7 @@ function deckEdit(id) {
   let spellWarned = false;
   const spellFail = (err, loud) => {
     if (!loud && spellWarned) return; spellWarned = true;
-    toast(!navigator.onLine ? 'Spelling check needs the internet' : err.message === 'busy' ? 'Spelling check is busy — try again in a minute' : 'Spelling check isn’t working right now');
+    toast(!navigator.onLine ? 'The full check needs the internet' : err.message === 'busy' ? 'The checker is busy — try again in a minute' : 'The checker isn’t working right now');
   };
   // Check a card a moment after you leave one of its fields.
   const pending = new Set(); let spellTimer;
@@ -1016,7 +1071,7 @@ function deckEdit(id) {
   };
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
-    <div class="row gap wrap"><button class="btn sm ghost" id="checkAll">${I.check} Check spelling</button><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
+    <div class="row gap wrap"><button class="btn sm ghost" id="checkAll">${I.check} Check for mistakes</button><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
     <div id="rows" class="edit-list">${d.cards.map(row).join('')}</div>
     <button class="btn block dashed" id="addRow">${I.plus} Add card</button>
     <div class="sticky-bottom">${fmtBar()}${accentBar()}<a class="btn primary" href="#/deck/${id}">Done</a></div>
@@ -1105,8 +1160,8 @@ function deckEdit(id) {
       await spellCheck(spellItems(d.cards));
       showAllIssues();
       const n = $$('.issue', rows).length;
-      if (!n) toast('No typos found ✓');
-      else { toast(`${n} possible typo${n === 1 ? '' : 's'} — tap a fix or Ignore`); $('.issue', rows).closest('.edit-row').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      if (!n) toast('No mistakes found ✓');
+      else { toast(`${n} possible mistake${n === 1 ? '' : 's'} — tap a fix or Ignore`); $('.issue', rows).closest('.edit-row').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
     } catch (err) { spellFail(err, true); } finally { if (b.isConnected) { b.disabled = false; b.innerHTML = html; } }
   };
   $('#swapAll').onclick = () => {
@@ -1804,7 +1859,7 @@ function settingsView() {
       <div class="field"><span>Photos show on</span>${seg('photoSide', [['en', 'English side'], ['es', 'Spanish side'], ['both', 'Both']], s.photoSide)}</div>
       <div class="field"><span>Typing &amp; quizzes: show first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
-      <label class="switch-row"><span><b>Check spelling as I type</b><small>Flags typos when you finish a field in the deck editor (sends the card's words to LanguageTool)</small></span><input type="checkbox" class="switch" name="spellCheck" ${s.spellCheck ? 'checked' : ''}></label>
+      <label class="switch-row"><span><b>Check spelling &amp; grammar as I type</b><small>Flags mistakes when you finish a field in the deck editor (sends the card's words to LanguageTool)</small></span><input type="checkbox" class="switch" name="spellCheck" ${s.spellCheck ? 'checked' : ''}></label>
       ${(s.spellIgnore || []).length ? `<button class="btn sm ghost" type="button" id="clearIgnore">Stop ignoring ${s.spellIgnore.length} word${s.spellIgnore.length === 1 ? '' : 's'}</button>` : ''}
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>
     </section>
