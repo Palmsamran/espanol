@@ -1,15 +1,16 @@
 /* ---------- Tokens ---------- */
 :root {
   color-scheme: light;
-  --bg: #faf7f2;
+  --bg: #f6f7f9;
   --surface: #ffffff;
-  --surface-2: #f2ece4;
-  --text: #1d1916;
-  --muted: #6e645b;
-  --border: #e7dfd5;
-  --primary: #c8102e;
+  --surface-2: #eef0f4;
+  --text: #15181e;
+  --muted: #5f6672;
+  --border: #e3e6eb;
+  --primary: #4f46e5;
   --on-primary: #ffffff;
-  --primary-soft: #fbe9ec;
+  --primary-soft: #eef0ff;
+  --hl: #fde68a;
   --accent: #e0a100;
   --good: #1e8449;
   --good-soft: #e4f4ea;
@@ -26,15 +27,16 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #14110f;
-    --surface: #1f1a17;
-    --surface-2: #2a231f;
-    --text: #f4ede6;
-    --muted: #a99d92;
-    --border: #372e28;
-    --primary: #f0566c;
-    --on-primary: #200307;
-    --primary-soft: #3a1a20;
+    --bg: #0f1115;
+    --surface: #181b21;
+    --surface-2: #22262e;
+    --text: #eef0f4;
+    --muted: #9aa1ad;
+    --border: #2b3038;
+    --primary: #8b8cf8;
+    --on-primary: #0d0e2b;
+    --primary-soft: #23244a;
+    --hl: rgba(250, 204, 21, .32);
     --accent: #f2b630;
     --good: #4ccd84;
     --good-soft: #163222;
@@ -51,15 +53,16 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #14110f;
-  --surface: #1f1a17;
-  --surface-2: #2a231f;
-  --text: #f4ede6;
-  --muted: #a99d92;
-  --border: #372e28;
-  --primary: #f0566c;
-  --on-primary: #200307;
-  --primary-soft: #3a1a20;
+  --bg: #0f1115;
+  --surface: #181b21;
+  --surface-2: #22262e;
+  --text: #eef0f4;
+  --muted: #9aa1ad;
+  --border: #2b3038;
+  --primary: #8b8cf8;
+  --on-primary: #0d0e2b;
+  --primary-soft: #23244a;
+  --hl: rgba(250, 204, 21, .32);
   --accent: #f2b630;
   --good: #4ccd84;
   --good-soft: #163222;
@@ -156,14 +159,14 @@ main {
 
 /* ---------- Home ---------- */
 .hero {
-  background: linear-gradient(135deg, #d0142f, #8e0c22);
+  background: linear-gradient(135deg, #5b54ea, #3f37c9);
   color: #fff; border-radius: 20px; padding: 20px; box-shadow: var(--shadow);
 }
 .hero-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 18px; }
 .hero h2 { margin: 2px 0 6px; font-size: 25px; }
 .hero p { margin: 0; color: rgba(255, 255, 255, .82); font-size: 14px; }
 .eyebrow { margin: 0; text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; opacity: .85; }
-.hero .btn.primary { background: #fff; border-color: #fff; color: #8e0c22; }
+.hero .btn.primary { background: #fff; border-color: #fff; color: #3f37c9; }
 .streak { display: grid; justify-items: center; gap: 2px; background: rgba(255, 255, 255, .14); border-radius: 14px; padding: 8px 12px; min-width: 76px; }
 .streak b { font-size: 22px; line-height: 1; }
 .streak span { font-size: 11px; opacity: .85; white-space: nowrap; }
@@ -271,7 +274,11 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
 .er-fields { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
 .er-fields label { display: grid; gap: 3px; }
 .er-fields label span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.er-fields input { padding: 8px 10px; min-height: 40px; border-radius: 10px; }
+.er-fields .rt {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  padding: 8px 10px; min-height: 40px; border-radius: 10px; line-height: 1.5; overflow-wrap: anywhere; cursor: text;
+}
+.er-fields .rt:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
 .er-del { margin-top: 18px; }
 @media (max-width: 520px) {
   .er-fields { grid-template-columns: 1fr; }
@@ -284,6 +291,10 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
   background: var(--bg); border-top: 1px solid var(--border);
 }
 .sticky-bottom .accents { margin: 0; }
+.fmt-bar { display: flex; gap: 6px; }
+.fmt-bar .fmt { font-size: 16px; }
+.fmt-bar mark { padding: 0 3px; }
+mark { background: var(--hl); color: inherit; border-radius: 3px; padding: 0 2px; }
 
 .accents { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .accent {

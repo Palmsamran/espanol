@@ -10,6 +10,11 @@ const STORE_KEY = 'espanol.v1';
 /* ---------- helpers ---------- */
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Card text can carry a few formatting tags: <b>, <i>, <u>, <mark>. Everything else is shown as plain text.
+const FMT = { b: 'b', i: 'i', u: 'u', h: 'mark' };
+const FMT_RE = /<\/?(?:b|i|u|mark)>/gi;
+const plain = (s) => String(s ?? '').replace(FMT_RE, '');
+const rich = (s) => esc(s).replace(/&lt;(\/?)(b|i|u|mark)&gt;/gi, (_, sl, t) => `<${sl}${t.toLowerCase()}>`);
 const shuffle = (arr) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -403,7 +408,7 @@ function buildReviewQueue(deckId, extraNew = 0) {
 /* ---------- answer checking ---------- */
 const deaccent = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
 const ARTICLE_RE = /^(el|la|los|las|un|una|unos|unas|to|the|a|an)\s+/;
-const normAns = (s) => String(s).toLowerCase().normalize('NFC')
+const normAns = (s) => plain(s).toLowerCase().normalize('NFC')
   .replace(/\([^)]*\)/g, ' ').replace(/[¿?¡!.,;:"“”«»…]/g, ' ').replace(/[’`]/g, "'")
   .replace(/\s+/g, ' ').trim();
 function lev(a, b) {
@@ -418,7 +423,7 @@ function lev(a, b) {
   return prev[b.length];
 }
 function answerVariants(ans) {
-  const set = new Set();
+  const set = new Set(); ans = plain(ans);
   const add = (s) => { const n = normAns(s); if (!n) return; set.add(n); const t = n.replace(ARTICLE_RE, ''); if (t) set.add(t); };
   add(ans);
   ans.replace(/\([^)]*\)/g, ' ').split(/[/;,]|\bor\b/).forEach(add);
@@ -452,7 +457,7 @@ function spanishVoice() {
 }
 function speak(text) {
   if (!canSpeak || !text) return;
-  const t = String(text).replace(/\([^)]*\)/g, ' ').trim();
+  const t = plain(text).replace(/\([^)]*\)/g, ' ').trim();
   speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(t);
   u.lang = state.settings.voiceLang;
@@ -460,8 +465,58 @@ function speak(text) {
   u.rate = state.settings.rate;
   speechSynthesis.speak(u);
 }
-const sayBtn = (text, cls = '') => (canSpeak ? `<button type="button" class="icon-btn say ${cls}" data-say="${esc(text)}" aria-label="Play pronunciation">${I.speaker}</button>` : '');
+const sayBtn = (text, cls = '') => (canSpeak ? `<button type="button" class="icon-btn say ${cls}" data-say="${esc(plain(text))}" aria-label="Play pronunciation">${I.speaker}</button>` : '');
 const starBtn = (c) => `<button type="button" class="icon-btn star ${c.starred ? 'on' : ''}" data-star="${c.id}" aria-pressed="${c.starred}" aria-label="Star card">${I.star}</button>`;
+const fmtBar = () => `<div class="fmt-bar" aria-label="Format text">${[['b', '<b>B</b>', 'Bold (⌘B)'], ['i', '<i>I</i>', 'Italic (⌘I)'], ['u', '<u>U</u>', 'Underline (⌘U)'], ['h', '<mark>H</mark>', 'Highlight (⌘⇧H)']]
+  .map(([k, label, title]) => `<button type="button" class="accent fmt" data-fmt="${k}" tabindex="-1" aria-label="${title.split(' ')[0]}" title="${title}">${label}</button>`).join('')}</div>`;
+// Format the selection (or the word under the cursor) in a card field; pressing again removes it.
+function toggleFmt(el, kind) {
+  el.focus();
+  const sel = getSelection();
+  if (!sel.rangeCount || !el.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+    const r = document.createRange(); r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
+  }
+  if (sel.isCollapsed && sel.modify) { sel.modify('move', 'backward', 'word'); sel.modify('extend', 'forward', 'word'); }
+  if (kind !== 'h') {
+    document.execCommand('styleWithCSS', false, false);
+    document.execCommand({ b: 'bold', i: 'italic', u: 'underline' }[kind]);
+  } else {
+    const r = sel.getRangeAt(0); const n = r.commonAncestorContainer;
+    const m = (n.nodeType === 1 ? n : n.parentElement).closest('mark');
+    if (m && el.contains(m)) m.replaceWith(...m.childNodes);
+    else if (!r.collapsed) {
+      const mark = document.createElement('mark'); mark.appendChild(r.extractContents());
+      mark.querySelectorAll('mark').forEach((x) => x.replaceWith(...x.childNodes));
+      r.insertNode(mark); sel.selectAllChildren(mark);
+    }
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// Turn an edited field back into stored text, keeping only <b>, <i>, <u> and <mark>.
+function serializeRich(root) {
+  let out = '';
+  const walk = (node, active) => {
+    for (const ch of node.childNodes) {
+      if (ch.nodeType === 3) { out += ch.nodeValue.replace(/\u00a0/g, ' '); continue; }
+      if (ch.nodeType !== 1) continue;
+      const tag = ch.tagName.toLowerCase(); const st = ch.style;
+      if (tag === 'br') { out += ' '; continue; }
+      if ((tag === 'div' || tag === 'p') && out && !out.endsWith(' ')) out += ' ';
+      const want = [];
+      if (tag === 'b' || tag === 'strong' || /^(bold|[6-9]00)$/.test(st.fontWeight)) want.push('b');
+      if (tag === 'i' || tag === 'em' || st.fontStyle === 'italic') want.push('i');
+      if (tag === 'u' || /underline/.test(st.textDecorationLine || st.textDecoration || '')) want.push('u');
+      if (tag === 'mark') want.push('mark');
+      const add = want.filter((t) => !active.includes(t));
+      add.forEach((t) => { out += `<${t}>`; });
+      walk(ch, active.concat(add));
+      add.reverse().forEach((t) => { out += `</${t}>`; });
+    }
+  };
+  walk(root, []);
+  for (let prev; prev !== out;) { prev = out; out = out.replace(/<(b|i|u|mark)>(\s*)<\/\1>/g, '$2').replace(/<\/(b|i|u|mark)><\1>/g, ''); }
+  return out.replace(/\s+/g, ' ').trim();
+}
 const accentBar = () => `<div class="accents" aria-label="Insert a special character">${['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ', '¿', '¡'].map((ch) => `<button type="button" class="accent" data-ins="${ch}" tabindex="-1">${ch}</button>`).join('')}</div>`;
 
 // which side is shown first
@@ -485,7 +540,9 @@ function insertAtCursor(inp, text) {
   inp.dispatchEvent(new Event('input', { bubbles: true }));
 }
 let lastInput = null;
-document.addEventListener('focusin', (e) => { if (e.target.matches('input:not([type]), input[type=text], textarea')) lastInput = e.target; });
+// Tapping the accent/format buttons shouldn't take focus (or the selection) away from the field.
+document.addEventListener('mousedown', (e) => { if (e.target.closest('.accent')) e.preventDefault(); });
+document.addEventListener('focusin', (e) => { if (e.target.matches('input:not([type]), input[type=text], textarea, .rt')) lastInput = e.target; });
 document.addEventListener('mousedown', (e) => { if (e.target.closest('[data-ins]')) e.preventDefault(); });
 document.addEventListener('click', (e) => {
   const say = e.target.closest('[data-say]');
@@ -500,9 +557,18 @@ document.addEventListener('click', (e) => {
     }
     return;
   }
+  const fb = e.target.closest('[data-fmt]');
+  if (fb) {
+    e.preventDefault();
+    const target = [document.activeElement, lastInput].find((el) => el && document.body.contains(el) && el.matches('.rt'));
+    if (target) toggleFmt(target, fb.dataset.fmt);
+    else toast('Tap into a card first');
+    return;
+  }
   const ins = e.target.closest('[data-ins]');
   if (ins) {
     e.preventDefault();
+    if (document.activeElement?.isContentEditable) { document.execCommand('insertText', false, ins.dataset.ins); return; }
     const inp = lastInput && document.body.contains(lastInput) && !lastInput.readOnly ? lastInput : $('.answer-input:not([readonly])');
     if (inp) insertAtCursor(inp, ins.dataset.ins);
   }
@@ -639,7 +705,7 @@ function deckView(id) {
       <h3>${plural(valid.length, 'card')}</h3>
       <div class="row gap"><a class="btn sm ghost" href="#/import/${d.id}">${I.upload} Add</a><a class="btn sm" href="#/deck/${d.id}/edit">${I.edit} Edit</a></div>
     </div>
-    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${status(c)}" title="${status(c)}"></span><div class="cr-text"><div class="cr-term" lang="es">${esc(c.term)}</div><div class="cr-def">${esc(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
+    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${status(c)}" title="${status(c)}"></span><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
     <div class="danger-row">
       <button class="btn sm ghost" id="copyText">${I.copy} Copy as text</button>
       <button class="btn sm ghost danger" id="delDeck">${I.trash} Delete deck</button>
@@ -661,13 +727,13 @@ function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><input class="er-term" lang="es" value="${esc(c.term)}" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="next"></label><label><span>English</span><input class="er-def" value="${esc(c.def)}" autocapitalize="off" autocomplete="off" enterkeyhint="next"></label></div><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label></div><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div>`;
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
     <div class="row gap wrap"><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
     <div id="rows" class="edit-list">${d.cards.map(row).join('')}</div>
     <button class="btn block dashed" id="addRow">${I.plus} Add card</button>
-    <div class="sticky-bottom">${accentBar()}<a class="btn primary" href="#/deck/${id}">Done</a></div>
+    <div class="sticky-bottom">${fmtBar()}${accentBar()}<a class="btn primary" href="#/deck/${id}">Done</a></div>
   `);
   const rows = $('#rows');
   const renumber = () => $$('.er-num', rows).forEach((n, i) => { n.textContent = i + 1; });
@@ -679,7 +745,8 @@ function deckEdit(id) {
   $('#deckName').oninput = (e) => { d.name = e.target.value.trim() || 'Untitled deck'; d.updated = Date.now(); saveSoon(); };
   rows.addEventListener('input', (e) => {
     const r = e.target.closest('.edit-row'); const c = r && d.cards.find((x) => x.id === r.dataset.id); if (!c) return;
-    if (e.target.classList.contains('er-term')) c.term = e.target.value; else c.def = e.target.value;
+    const val = serializeRich(e.target);
+    if (e.target.classList.contains('er-term')) c.term = val; else c.def = val;
     c.updated = Date.now();
     saveSoon();
   });
@@ -689,12 +756,23 @@ function deckEdit(id) {
     tombstone('cards', r.dataset.id); d.cards = d.cards.filter((x) => x.id !== r.dataset.id); r.remove(); renumber(); saveSoon();
   });
   rows.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      const kind = k === 'b' ? 'b' : k === 'i' ? 'i' : k === 'u' ? 'u' : (k === 'h' && e.shiftKey) ? 'h' : null;
+      if (kind && e.target.matches('.rt')) { e.preventDefault(); toggleFmt(e.target, kind); }
+      return;
+    }
     if (e.key !== 'Enter') return;
     e.preventDefault();
     const r = e.target.closest('.edit-row');
     if (e.target.classList.contains('er-term')) r.querySelector('.er-def').focus();
     else if (r.nextElementSibling) r.nextElementSibling.querySelector('.er-term').focus();
     else addRow();
+  });
+  rows.addEventListener('paste', (e) => { // paste as plain text
+    if (!e.target.closest('.rt')) return;
+    e.preventDefault();
+    document.execCommand('insertText', false, (e.clipboardData?.getData('text/plain') || '').replace(/\s+/g, ' '));
   });
   $('#addRow').onclick = addRow;
   $('#swapAll').onclick = () => {
@@ -771,7 +849,7 @@ function importView(deckId) {
     const { cards, skipped } = parseImport(text, segVal('sepTerm'), $('#sepCustom').value, segVal('sepRow'), segVal('order'));
     $('#impPreview').innerHTML = !text.trim() ? '' : `
       <p><b>${plural(cards.length, 'card')}</b> found${skipped ? ` <span class="muted">· ${plural(skipped, 'line')} skipped (no separator found)</span>` : ''}</p>
-      ${cards.length ? `<table><thead><tr><th>Spanish</th><th>English</th></tr></thead><tbody>${cards.slice(0, 5).map((c) => `<tr><td lang="es">${esc(c.term)}</td><td>${esc(c.def)}</td></tr>`).join('')}</tbody></table>${cards.length > 5 ? `<p class="muted small" style="margin-top:6px">…and ${cards.length - 5} more</p>` : ''}` : ''}`;
+      ${cards.length ? `<table><thead><tr><th>Spanish</th><th>English</th></tr></thead><tbody>${cards.slice(0, 5).map((c) => `<tr><td lang="es">${rich(c.term)}</td><td>${rich(c.def)}</td></tr>`).join('')}</tbody></table>${cards.length > 5 ? `<p class="muted small" style="margin-top:6px">…and ${cards.length - 5} more</p>` : ''}` : ''}`;
     const go = $('#impGo'); go.disabled = !cards.length;
     go.textContent = cards.length ? `Import ${plural(cards.length, 'card')}` : 'Import';
     return cards;
@@ -834,13 +912,13 @@ function choicesFor(it, pool) {
 }
 
 function questionCard(it, hint) {
-  return `<div class="q-card"><span class="face-label">${hint}</span><div class="q-text" ${langAttr(it.promptEs)}>${esc(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>`;
+  return `<div class="q-card"><span class="face-label">${hint}</span><div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>`;
 }
 
 function mcQuestion(el, it, options, done) {
   el.innerHTML = `
     ${questionCard(it, `Choose the ${it.promptEs ? 'English' : 'Spanish'}`)}
-    <div class="options">${options.map((o, k) => `<button type="button" class="option" data-k="${k}" ${langAttr(!it.promptEs)}><span class="okey">${k + 1}</span><span>${esc(o)}</span></button>`).join('')}</div>
+    <div class="options">${options.map((o, k) => `<button type="button" class="option" data-k="${k}" ${langAttr(!it.promptEs)}><span class="okey">${k + 1}</span><span>${rich(o)}</span></button>`).join('')}</div>
     <div class="q-foot"><button class="btn ghost sm" type="button" id="idk">I don't know</button></div>
     <div id="fb"></div>`;
   if (state.settings.autoSpeak && it.promptEs) speak(it.prompt);
@@ -855,7 +933,7 @@ function mcQuestion(el, it, options, done) {
     $('#idk', el).hidden = true;
     if (state.settings.autoSpeak && !it.promptEs) speak(it.answer);
     if (ok) { feedback(el, 'good', praise()); later(() => done(true), 750); }
-    else feedback(el, 'bad', `The answer is <b ${langAttr(!it.promptEs)}>${esc(it.answer)}</b>`, () => done(false));
+    else feedback(el, 'bad', `The answer is <b ${langAttr(!it.promptEs)}>${rich(it.answer)}</b>`, () => done(false));
   };
   $('.options', el).onclick = (e) => { const b = e.target.closest('.option'); if (b) pick(+b.dataset.k); };
   $('#idk', el).onclick = () => pick(null);
@@ -882,7 +960,7 @@ function writtenQuestion(el, it, done) {
     inp.readOnly = true; $('button[type=submit]', el).disabled = true; $('#idk', el).hidden = true;
     const acc = $('.accents', el); if (acc) acc.hidden = true;
     const res = given ? checkAnswer(given, it.answer) : 'wrong';
-    const A = `<b ${langAttr(ansEs)}>${esc(it.answer)}</b>`;
+    const A = `<b ${langAttr(ansEs)}>${rich(it.answer)}</b>`;
     if (state.settings.autoSpeak && ansEs) speak(it.answer);
     if (res === 'correct') {
       inp.classList.add('ok'); feedback(el, 'good', praise()); later(() => done(true), 850);
@@ -903,7 +981,7 @@ function writtenQuestion(el, it, done) {
 }
 
 function faceHtml(c, text, isEs, front) {
-  return `<div class="face-inner"><span class="face-label">${isEs ? 'Español' : 'English'}</span><div class="face-text ${text.length > 36 ? 'long' : ''}" ${langAttr(isEs)}>${esc(text)}</div><div class="face-actions">${isEs ? sayBtn(text) : ''}${front ? starBtn(c) : ''}</div></div>`;
+  return `<div class="face-inner"><span class="face-label">${isEs ? 'Español' : 'English'}</span><div class="face-text ${plain(text).length > 36 ? 'long' : ''}" ${langAttr(isEs)}>${rich(text)}</div><div class="face-actions">${isEs ? sayBtn(text) : ''}${front ? starBtn(c) : ''}</div></div>`;
 }
 
 /* ---------- views: flashcards ---------- */
@@ -1034,7 +1112,7 @@ function learnView(id, q) {
       <div class="big-ic">${I.trophy}</div>
       <h2>¡Lo lograste!</h2>
       <p class="muted">You learned all ${plural(items.length, 'card')}${hard.length ? ` — ${hard.length} gave you trouble.` : ' with no mistakes.'}</p>
-      ${hard.length ? `<div class="card-list compact">${hard.slice(0, 10).map((x) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${esc(x.c.term)}</div><div class="cr-def">${esc(x.c.def)}</div></div><span class="pill bad">${x.wrong}×</span></div>`).join('')}</div>` : ''}
+      ${hard.length ? `<div class="card-list compact">${hard.slice(0, 10).map((x) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(x.c.term)}</div><div class="cr-def">${rich(x.c.def)}</div></div><span class="pill bad">${x.wrong}×</span></div>`).join('')}</div>` : ''}
       <div class="stack">
         ${hard.length ? '<button class="btn primary block" id="again">Practice the tricky ones</button>' : ''}
         <button class="btn block" id="restart">Learn again</button>
@@ -1069,7 +1147,7 @@ function writeView(id, q) {
     render(`<div class="summary">
       <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
       <h2>${right} of ${results.length} correct</h2>
-      ${wrong.length ? `<div class="card-list compact">${wrong.map((c) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${esc(c.term)}</div><div class="cr-def">${esc(c.def)}</div></div>${sayBtn(c.term)}</div>`).join('')}</div>` : '<p class="muted">Not a single mistake. ¡Increíble!</p>'}
+      ${wrong.length ? `<div class="card-list compact">${wrong.map((c) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}</div>`).join('')}</div>` : '<p class="muted">Not a single mistake. ¡Increíble!</p>'}
       <div class="stack">
         ${wrong.length ? `<button class="btn primary block" id="again">Retry the ${wrong.length} I missed</button>` : ''}
         <button class="btn block" id="restart">Start over</button>
@@ -1104,7 +1182,7 @@ function matchView(id, q) {
     const pick = shuffle(all).slice(0, 6);
     const tiles = shuffle(pick.flatMap((c) => [{ id: c.id, text: c.term, es: true }, { id: c.id, text: c.def, es: false }]));
     render(`<div class="match-top"><span class="timer" id="timer">0.0s</span><span class="muted" id="left">${plural(pick.length, 'pair')} left</span></div>
-      <div class="match-grid" id="grid">${tiles.map((t, k) => `<button type="button" class="tile ${t.es ? 'es' : ''}" data-k="${k}" ${langAttr(t.es)}>${esc(t.text)}</button>`).join('')}</div>`);
+      <div class="match-grid" id="grid">${tiles.map((t, k) => `<button type="button" class="tile ${t.es ? 'es' : ''}" data-k="${k}" ${langAttr(t.es)}>${rich(t.text)}</button>`).join('')}</div>`);
     const t0 = performance.now(); let penalty = 0; let sel = null; let left = pick.length;
     const elapsed = () => performance.now() - t0 + penalty;
     timerId = setInterval(() => { const el = $('#timer'); if (el) el.textContent = fmtTime(elapsed()); }, 100);
@@ -1221,7 +1299,7 @@ function reviewView(q) {
     if (flipStyle) return showFlip(c, d, it, isNew);
     render(`
       ${progressTop(done, done + queue.length, `${queue.length} left`)}
-      <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span><div class="q-text" ${langAttr(it.promptEs)}>${esc(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
+      <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span><div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
       <form class="answer-form" id="rf" autocomplete="off">
         <input class="answer-input" ${langAttr(ansEs)} placeholder="Type the ${ansEs ? 'Spanish' : 'English'} (optional)" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done">
         <button class="btn primary" type="submit" id="showBtn">Show</button>
@@ -1255,7 +1333,7 @@ function reviewView(q) {
       else if (res === 'typo') note = '<p class="muted">Close — check the spelling.</p>';
       const labels = [['Again', 'again'], ['Hard', 'hard'], ['Good', 'good'], ['Easy', 'easy']];
       $('#reveal').innerHTML = `
-        <div class="answer-card"><span class="face-label">Answer</span><div class="a-text" ${langAttr(ansEs)}>${esc(it.answer)}</div>${ansEs ? sayBtn(it.answer) : ''}${note}</div>
+        <div class="answer-card"><span class="face-label">Answer</span><div class="a-text" ${langAttr(ansEs)}>${rich(it.answer)}</div>${ansEs ? sayBtn(it.answer) : ''}${note}</div>
         <div class="srs-row">${labels.map(([l, k], n) => `<button type="button" class="srs ${k} ${n === suggested ? 'suggested' : ''}" data-q="${n}"><b>${l}</b><span>${fmtInterval(c.srs, n)}</span></button>`).join('')}</div>
         <p class="srs-help">How well did you remember it?${isTouch() ? '' : ' Keys 1–4.'}</p>`;
       if (state.settings.autoSpeak && ansEs) speak(it.answer);

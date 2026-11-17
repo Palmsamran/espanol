@@ -12,7 +12,7 @@ A Spanish vocabulary practice app that runs in any browser and installs on your 
 | **Write** | Type every answer. It accepts answers that only miss an accent (unless strict mode is on), small typos, and any one of the alternatives in "time / weather". |
 | **Match** | Timed game: pair 6 Spanish words with their meanings. |
 
-There's also text-to-speech in Spain, Mexico or US Spanish, starred cards, an accent keyboard (á é í ó ú ü ñ ¿ ¡), dark mode, and import from Quizlet.
+There's also text formatting on cards (**bold**, *italic*, underline and highlight, from the buttons in the deck editor or ⌘B / ⌘I / ⌘U / ⌘⇧H), text-to-speech in Spain, Mexico or US Spanish, starred cards, an accent keyboard (á é í ó ú ü ñ ¿ ¡), dark mode, and import from Quizlet.
 
 ## Files
 
