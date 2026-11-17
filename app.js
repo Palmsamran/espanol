@@ -10,11 +10,14 @@ const STORE_KEY = 'espanol.v1';
 /* ---------- helpers ---------- */
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// Card text can carry a few formatting tags: <b>, <i>, <u>, <mark>. Everything else is shown as plain text.
-const FMT = { b: 'b', i: 'i', u: 'u', h: 'mark' };
-const FMT_RE = /<\/?(?:b|i|u|mark)>/gi;
+// Card text can carry a few formatting tags: <b>, <i>, <u>, and <mark> (yellow) or <mark class="green|blue|pink">.
+// Everything else is shown as plain text.
+const HL = { h: '', hg: 'green', hb: 'blue', hp: 'pink' }; // highlight buttons -> mark color ('' = yellow)
+const FMT_RE = /<\/?(?:b|i|u|mark)(?: class="(?:green|blue|pink)")?>/gi;
 const plain = (s) => String(s ?? '').replace(FMT_RE, '');
-const rich = (s) => esc(s).replace(/&lt;(\/?)(b|i|u|mark)&gt;/gi, (_, sl, t) => `<${sl}${t.toLowerCase()}>`);
+const rich = (s) => esc(s)
+  .replace(/&lt;mark class=&quot;(green|blue|pink)&quot;&gt;/gi, (_, c) => `<mark class="${c.toLowerCase()}">`)
+  .replace(/&lt;(\/?)(b|i|u|mark)&gt;/gi, (_, sl, t) => `<${sl}${t.toLowerCase()}>`);
 const shuffle = (arr) => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -467,8 +470,8 @@ function speak(text) {
 }
 const sayBtn = (text, cls = '') => (canSpeak ? `<button type="button" class="icon-btn say ${cls}" data-say="${esc(plain(text))}" aria-label="Play pronunciation">${I.speaker}</button>` : '');
 const starBtn = (c) => `<button type="button" class="icon-btn star ${c.starred ? 'on' : ''}" data-star="${c.id}" aria-pressed="${c.starred}" aria-label="Star card">${I.star}</button>`;
-const fmtBar = () => `<div class="fmt-bar" aria-label="Format text">${[['b', '<b>B</b>', 'Bold (⌘B)'], ['i', '<i>I</i>', 'Italic (⌘I)'], ['u', '<u>U</u>', 'Underline (⌘U)'], ['h', '<mark>H</mark>', 'Highlight (⌘⇧H)']]
-  .map(([k, label, title]) => `<button type="button" class="accent fmt" data-fmt="${k}" tabindex="-1" aria-label="${title.split(' ')[0]}" title="${title}">${label}</button>`).join('')}</div>`;
+const fmtBar = () => `<div class="fmt-bar" aria-label="Format text">${[['b', '<b>B</b>', 'Bold (⌘B)'], ['i', '<i>I</i>', 'Italic (⌘I)'], ['u', '<u>U</u>', 'Underline (⌘U)'], ['h', '<span class="sw"></span>', 'Yellow highlight (⌘⇧H)'], ['hg', '<span class="sw green"></span>', 'Green highlight'], ['hb', '<span class="sw blue"></span>', 'Blue highlight'], ['hp', '<span class="sw pink"></span>', 'Pink highlight']]
+  .map(([k, label, title]) => `<button type="button" class="accent fmt ${k in HL ? 'hl' : ''}" data-fmt="${k}" tabindex="-1" aria-label="${title.replace(/ \(.*/, '')}" title="${title}">${label}</button>`).join('')}</div>`;
 // Format the selection (or the word under the cursor) in a card field; pressing again removes it.
 function toggleFmt(el, kind) {
   el.focus();
@@ -477,15 +480,19 @@ function toggleFmt(el, kind) {
     const r = document.createRange(); r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
   }
   if (sel.isCollapsed && sel.modify) { sel.modify('move', 'backward', 'word'); sel.modify('extend', 'forward', 'word'); }
-  if (kind !== 'h') {
+  if (!(kind in HL)) {
     document.execCommand('styleWithCSS', false, false);
     document.execCommand({ b: 'bold', i: 'italic', u: 'underline' }[kind]);
   } else {
     const r = sel.getRangeAt(0); const n = r.commonAncestorContainer;
     const m = (n.nodeType === 1 ? n : n.parentElement).closest('mark');
-    if (m && el.contains(m)) m.replaceWith(...m.childNodes);
-    else if (!r.collapsed) {
-      const mark = document.createElement('mark'); mark.appendChild(r.extractContents());
+    const color = HL[kind];
+    if (m && el.contains(m)) { // same color again removes it; another color recolors it
+      if ((m.getAttribute('class') || '') === color) m.replaceWith(...m.childNodes);
+      else if (color) m.className = color; else m.removeAttribute('class');
+    } else if (!r.collapsed) {
+      const mark = document.createElement('mark'); if (color) mark.className = color;
+      mark.appendChild(r.extractContents());
       mark.querySelectorAll('mark').forEach((x) => x.replaceWith(...x.childNodes));
       r.insertNode(mark); sel.selectAllChildren(mark);
     }
@@ -506,15 +513,15 @@ function serializeRich(root) {
       if (tag === 'b' || tag === 'strong' || /^(bold|[6-9]00)$/.test(st.fontWeight)) want.push('b');
       if (tag === 'i' || tag === 'em' || st.fontStyle === 'italic') want.push('i');
       if (tag === 'u' || /underline/.test(st.textDecorationLine || st.textDecoration || '')) want.push('u');
-      if (tag === 'mark') want.push('mark');
+      if (tag === 'mark') { const c = ch.getAttribute('class'); want.push(['green', 'blue', 'pink'].includes(c) ? `mark class="${c}"` : 'mark'); }
       const add = want.filter((t) => !active.includes(t));
       add.forEach((t) => { out += `<${t}>`; });
       walk(ch, active.concat(add));
-      add.reverse().forEach((t) => { out += `</${t}>`; });
+      add.reverse().forEach((t) => { out += `</${t.split(' ')[0]}>`; });
     }
   };
   walk(root, []);
-  for (let prev; prev !== out;) { prev = out; out = out.replace(/<(b|i|u|mark)>(\s*)<\/\1>/g, '$2').replace(/<\/(b|i|u|mark)><\1>/g, ''); }
+  for (let prev; prev !== out;) { prev = out; out = out.replace(/<(b|i|u|mark)(?: class="\w+")?>(\s*)<\/\1>/g, '$2').replace(/<\/(b|i|u)><\1>/g, '').replace(/<\/mark><mark>/g, ''); }
   return out.replace(/\s+/g, ' ').trim();
 }
 const accentBar = () => `<div class="accents" aria-label="Insert a special character">${['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ', '¿', '¡'].map((ch) => `<button type="button" class="accent" data-ins="${ch}" tabindex="-1">${ch}</button>`).join('')}</div>`;
