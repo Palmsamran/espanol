@@ -46,6 +46,7 @@ const I = {
   download: svg('<path d="M12 4v12M7 11l5 5 5-5M4 20h16"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),
   trash: svg('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
+  globe: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
   search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>'),
   image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>'),
   shuffle: svg('<path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
@@ -78,10 +79,10 @@ const STARTER = [
 /* ---------- state ---------- */
 const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
 // Settings that sync between devices (voice and install hint stay per-device).
-const SYNCED_SETTINGS = ['direction', 'flipDirection', 'photoSide', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme', 'spellCheck', 'spellIgnore'];
+const SYNCED_SETTINGS = ['direction', 'flipDirection', 'photoSide', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme', 'spellCheck', 'spellIgnore', 'autoTranslate'];
 const defaultSettings = () => ({
   direction: 'es-en', flipDirection: 'en-es', photoSide: 'en', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
-  rate: 0.9, newPerDay: 20, theme: 'system', spellCheck: true, spellIgnore: [], hideInstallHint: false, updated: 0,
+  rate: 0.9, newPerDay: 20, theme: 'system', spellCheck: true, spellIgnore: [], autoTranslate: true, hideInstallHint: false, updated: 0,
 });
 const defaultStats = () => ({ history: {} });
 const freshSrs = () => ({ due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, last: 0 });
@@ -926,6 +927,34 @@ function deckView(id) {
   };
 }
 
+/* ---------- auto-translate ---------- */
+// Google Translate's free web endpoint: the main translation plus dictionary alternatives for single words.
+const trCache = new Map();
+async function translate(text, sl, tl) {
+  const key = `${sl}|${tl}|${text}`;
+  if (trCache.has(key)) return trCache.get(key);
+  // "to save money" → "ahorrar dinero" (an infinitive), not "para ahorrar dinero" ("in order to").
+  const q = sl === 'en' ? text.replace(/^to\s+/i, '') : text;
+  const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tl}&dt=t&dt=bd&q=${encodeURIComponent(q)}`);
+  if (!res.ok) throw new Error(String(res.status));
+  const d = await res.json();
+  let main = (Array.isArray(d[0]) ? d[0] : []).map((x) => (x && x[0]) || '').join('').trim();
+  const dict = Array.isArray(d[1]) ? d[1] : [];
+  let alts = [];
+  // A Spanish infinitive (hablar, comer, vivir, hospedarse) → English "to …", from the verb meanings only.
+  const verb = sl === 'es' && /^\p{L}+(?:ar|er|ir|ír)(?:se)?$/iu.test(text) && dict.find((p) => p[0] === 'verb');
+  const enVerb = sl === 'en' && q !== text && dict.find((p) => p[0] === 'verb'); // "to stay" → verbs only, not "estancia"
+  if (enVerb) alts = (enVerb[1] || []).slice(0, 5);
+  else if (verb) {
+    const to = (w) => (/^to /i.test(w) ? w : `to ${w}`);
+    main = to(main); alts = (verb[1] || []).slice(0, 5).map(to);
+  } else dict.forEach((p, i) => (p[1] || []).slice(0, i ? 2 : 4).forEach((w) => alts.push(w)));
+  alts = [...new Set(alts.filter((a) => a && a.toLowerCase() !== main.toLowerCase()))].slice(0, 5);
+  const out = { main, alts };
+  trCache.set(key, out);
+  return out;
+}
+
 /* ---------- spelling & grammar check ---------- */
 // Uses LanguageTool's free public service (only the card's words are sent, and only when checking),
 // plus a few built-in rules for common learner mistakes it misses, which also work offline.
@@ -1048,7 +1077,7 @@ function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label><div class="er-issues">${issuesHtml(c)}</div>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label><div class="er-tr" hidden></div><div class="er-issues">${issuesHtml(c)}</div>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
   const setRowImg = (r, c) => { r.querySelector('.er-img').outerHTML = erImg(c); };
   const showIssues = (r, c) => { const box = r.querySelector('.er-issues'); const h = issuesHtml(c); if (box.innerHTML !== h) box.innerHTML = h; };
   const showAllIssues = () => $$('.edit-row', rows).forEach((r) => { const c = d.cards.find((x) => x.id === r.dataset.id); if (c) showIssues(r, c); });
@@ -1092,10 +1121,38 @@ function deckEdit(id) {
     c.updated = Date.now();
     saveSoon();
     showIssues(r, c);
+    const tb = r.querySelector('.er-tr'); // you edited the auto-translated side yourself
+    if (!tb.hidden && tb.dataset.f === (e.target.classList.contains('er-term') ? 'term' : 'def')) tb.hidden = true;
   });
+  // Auto-translate: when you finish one side and the other is still empty, fill it in.
+  const fieldEl = (r, f) => r.querySelector(f === 'term' ? '.er-term' : '.er-def');
+  const setField = (r, c, f, v, select) => {
+    c[f] = v; c.updated = Date.now(); saveSoon();
+    const el = fieldEl(r, f); el.innerHTML = rich(v);
+    if (select && document.activeElement === el) { // so typing replaces it and Enter keeps it
+      const rg = document.createRange(); rg.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(rg);
+    }
+    showIssues(r, c); queueCheck(c);
+  };
+  const trBusy = new Set();
+  const autoTranslate = async (r, c, from) => {
+    if (state.settings.autoTranslate === false) return;
+    const to = from === 'term' ? 'def' : 'term';
+    const src = plain(c[from]).trim();
+    if (!src || plain(c[to]).trim() || trBusy.has(c.id)) return;
+    trBusy.add(c.id);
+    let tr;
+    try { tr = await translate(src, from === 'term' ? 'es' : 'en', from === 'term' ? 'en' : 'es'); } catch { return; } finally { trBusy.delete(c.id); }
+    if (!tr.main || !r.isConnected || plain(c[to]).trim() || plain(c[from]).trim() !== src) return;
+    setField(r, c, to, tr.main, true);
+    const box = r.querySelector('.er-tr'); box.dataset.f = to;
+    box.innerHTML = `${I.globe}<span class="tr-label">Auto-translated</span>${tr.alts.length ? `<span class="muted">or</span>${tr.alts.map((a) => `<button type="button" class="chip tr-pick" data-v="${esc(a)}" ${to === 'term' ? 'lang="es"' : ''}>${esc(a)}</button>`).join('')}` : ''}<button type="button" class="chip ghost tr-x" aria-label="Hide">${I.x}</button>`;
+    box.hidden = false;
+  };
   rows.addEventListener('focusout', (e) => {
     if (!e.target.classList?.contains('rt')) return;
-    const [, c] = rowCard(e.target) || []; if (c) queueCheck(c);
+    const [r, c] = rowCard(e.target) || [];
+    if (c) { queueCheck(c); autoTranslate(r, c, e.target.classList.contains('er-term') ? 'term' : 'def'); }
   });
   const rowCard = (el) => { const r = el.closest('.edit-row'); return r && [r, d.cards.find((x) => x.id === r.dataset.id)]; };
   rows.addEventListener('change', async (e) => {
@@ -1103,8 +1160,16 @@ function deckEdit(id) {
     const [r, c] = rowCard(e.target) || []; const f = e.target.files[0]; e.target.value = '';
     if (c && f && await attachPhoto(c, f)) setRowImg(r, c);
   });
-  rows.addEventListener('mousedown', (e) => { if (e.target.closest('.issue .chip')) e.preventDefault(); });
+  rows.addEventListener('mousedown', (e) => { if (e.target.closest('.issue .chip, .er-tr .chip')) e.preventDefault(); });
   rows.addEventListener('click', (e) => {
+    const tp = e.target.closest('.tr-pick, .tr-x');
+    if (tp) {
+      const [r, c] = rowCard(tp) || []; if (!c) return;
+      const box = r.querySelector('.er-tr');
+      if (tp.classList.contains('tr-pick')) setField(r, c, box.dataset.f, tp.dataset.v, false);
+      box.hidden = true;
+      return;
+    }
     const fx = e.target.closest('.fix');
     if (fx) {
       const [r, c] = rowCard(fx) || []; if (!c) return;
@@ -1860,6 +1925,7 @@ function settingsView() {
       <div class="field"><span>Typing &amp; quizzes: show first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
       <label class="switch-row"><span><b>Check spelling &amp; grammar as I type</b><small>Flags mistakes when you finish a field in the deck editor (sends the card's words to LanguageTool)</small></span><input type="checkbox" class="switch" name="spellCheck" ${s.spellCheck ? 'checked' : ''}></label>
+      <label class="switch-row"><span><b>Auto-translate new cards</b><small>When you finish one side of a card and the other is empty, fill it in (uses Google Translate)</small></span><input type="checkbox" class="switch" name="autoTranslate" ${s.autoTranslate !== false ? 'checked' : ''}></label>
       ${(s.spellIgnore || []).length ? `<button class="btn sm ghost" type="button" id="clearIgnore">Stop ignoring ${s.spellIgnore.length} word${s.spellIgnore.length === 1 ? '' : 's'}</button>` : ''}
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>
     </section>
