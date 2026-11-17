@@ -172,14 +172,38 @@ async function gh(path, { token = sync.token, method = 'GET', body } = {}) {
   if (!res.ok) { const e = new Error(`GitHub error ${res.status}`); e.status = res.status; throw e; }
   return res.json();
 }
-async function findGist(token) {
+// Every sync gist on the account, oldest first. Normally there is one; if two devices each created one
+// (e.g. connected at nearly the same time), the oldest is the one everybody uses.
+async function listSyncGists(token = sync.token) {
+  const all = [];
   for (let page = 1; page <= 10; page++) {
     const list = await gh(`/gists?per_page=100&page=${page}`, { token });
-    const g = list.find((x) => x.files && x.files[GIST_FILE]);
-    if (g) return g;
-    if (list.length < 100) return null;
+    all.push(...list.filter((x) => x.files && x.files[GIST_FILE]));
+    if (list.length < 100) break;
   }
-  return null;
+  return all.sort((a, b) => (Date.parse(a.created_at) - Date.parse(b.created_at)) || (a.id < b.id ? -1 : 1));
+}
+async function findGist(token) { return (await listSyncGists(token))[0] || null; }
+// Merge any extra sync gists into this device, switch to the oldest one, and return the extras so they can be
+// retired after the merged data is written. Retired gists are renamed, not deleted, so they stay as a backup.
+async function settleGists() {
+  const all = await listSyncGists();
+  if (!all.length) return [];
+  const main = all[0]; const extras = all.slice(1).map((g) => g.id);
+  if (sync.gistId !== main.id) { if (!extras.includes(sync.gistId)) extras.push(sync.gistId); sync.gistId = main.id; saveSync(); }
+  let changed = false;
+  for (const id of extras) {
+    try { const t = await readRemote(id); if (t) changed = mergeRemote(JSON.parse(t)) || changed; } catch (e) { if (e.status !== 404) throw e; }
+  }
+  if (changed) save({ silent: true });
+  return extras;
+}
+async function retireGists(ids) {
+  for (const id of ids) {
+    try {
+      await gh(`/gists/${id}`, { method: 'PATCH', body: JSON.stringify({ description: 'Español app — old sync copy (already merged, safe to delete)', files: { [GIST_FILE]: { filename: 'espanol-sync-merged.json' } } }) });
+    } catch { /* already gone or renamed by the other device */ }
+  }
 }
 async function readRemote(id, token = sync.token) {
   const g = await gh(`/gists/${id}`, { token });
@@ -267,14 +291,20 @@ async function runSync() {
   syncState.busy = true; syncState.dirty = false; clearTimeout(syncState.timer);
   setSyncStatus('syncing');
   try {
+    let retire = []; let merged = false;
+    if (!(Date.now() - (sync.dupCheck || 0) < 10 * 60e3)) {
+      const before = JSON.stringify(state.decks);
+      retire = await settleGists(); merged = retire.length > 0 && JSON.stringify(state.decks) !== before;
+    }
     const text = await readRemote(sync.gistId);
-    let changed = false;
-    if (text) { try { changed = mergeRemote(JSON.parse(text)); } catch { /* unreadable remote: overwrite it */ } }
+    let changed = merged;
+    if (text) { try { changed = mergeRemote(JSON.parse(text)) || changed; } catch { /* unreadable remote: overwrite it */ } }
     if (changed) save({ silent: true });
     try { await uploadPhotos(); } catch (e) { if (e.status === 401) throw e; /* photos retry next sync */ }
     const out = syncPayload();
     if (out !== text) await gh(`/gists/${sync.gistId}`, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: out } } }) });
-    sync.lastSync = Date.now(); saveSync();
+    if (retire.length) await retireGists(retire);
+    sync.lastSync = Date.now(); sync.dupCheck = Date.now(); saveSync();
     try { await downloadPhotos(); } catch { /* retry next sync */ }
     syncState.error = ''; setSyncStatus('ok');
     if (changed) refreshAfterSync();
