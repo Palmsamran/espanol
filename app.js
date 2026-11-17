@@ -878,8 +878,8 @@ function nearText(a, b) {
 const sameCard = (a, b) => (dupKey(a.term) && dupKey(a.term) === dupKey(b.term) && nearText(a.def, b.def))
   || (dupKey(a.def) && dupKey(a.def) === dupKey(b.def) && nearText(a.term, b.term));
 // Fold card o into card k: the most recent text wins; keep stars, photos and the latest study progress.
-function absorbCard(k, o) {
-  if (o.updated > k.updated) { k.term = o.term; k.def = o.def; if (o.img) k.img = o.img; }
+function absorbCard(k, o, keepText = false) {
+  if (!keepText && o.updated > k.updated) { k.term = o.term; k.def = o.def; if (o.img) k.img = o.img; }
   if (!k.img && o.img) k.img = o.img;
   k.starred = k.starred || o.starred;
   if (o.srs.last > k.srs.last) k.srs = { ...o.srs };
@@ -922,6 +922,21 @@ function dedupe(decks) {
     }
     d.cards = out;
   }
+  // The same card in two different decks: keep the copy in the older deck (its progress, stars and photo are kept).
+  const seen = new Map();
+  const index = (k, v) => { if (!k) return; if (!seen.has(k)) seen.set(k, []); seen.get(k).push(v); };
+  for (const d of [...decks].sort((a, b) => (a.created || 0) - (b.created || 0))) {
+    const out = [];
+    for (const c of d.cards) {
+      const tk = dupKey(c.term); const dk = dupKey(c.def);
+      const cands = [...(seen.get(`t${tk}`) || []), ...(seen.get(`d${dk}`) || [])];
+      const hit = tk && dk ? cands.find((x) => x.d !== d && sameCard(x.c, c)) : null;
+      if (!hit) { out.push(c); index(tk && `t${tk}`, { c, d }); index(dk && `d${dk}`, { c, d }); continue; }
+      cardMerges.push({ deck: hit.d.name, from: d.name, keep: { term: hit.c.term, def: hit.c.def }, drop: { term: c.term, def: c.def } });
+      absorbCard(hit.c, c, true); tomb.cards.push(c.id);
+    }
+    d.cards = out;
+  }
   deckMerges.forEach((m) => { m.cards = decks.find((d) => d.id === m.id)?.cards.length || 0; });
   const count = deckMerges.reduce((n, m) => n + m.copies - 1, 0) + cardMerges.length;
   return { decks, tomb, deckMerges, cardMerges, count };
@@ -949,7 +964,8 @@ function dupesView() {
   render(`
     <p class="muted">These look like the same decks or cards saved twice, usually from importing on two devices and then combining them with sync. For each pair, the most recently edited version is kept (so your corrections stay), along with stars, photos and the latest study progress.</p>
     ${r.deckMerges.length ? `<section class="panel"><h3>Decks saved more than once</h3><ul class="dupe-list">${r.deckMerges.map((m) => `<li><b>${esc(m.name)}</b> appears ${m.copies} times → becomes one deck of ${plural(m.cards, 'card')}</li>`).join('')}</ul></section>` : ''}
-    ${r.cardMerges.length ? `<section class="panel"><h3>Cards saved twice</h3><ul class="dupe-list">${r.cardMerges.map((m) => `<li><span class="muted small">${esc(m.deck)}</span><div>Keep ${card(m.keep)}</div>${dupKey(m.keep.term) === dupKey(m.drop.term) && dupKey(m.keep.def) === dupKey(m.drop.def) ? '' : `<div class="muted">Remove <s>${card(m.drop)}</s></div>`}</li>`).join('')}</ul></section>` : ''}
+    ${r.cardMerges.some((m) => m.from) ? `<section class="panel"><h3>Same card in two decks</h3><ul class="dupe-list">${r.cardMerges.filter((m) => m.from).map((m) => `<li><div>${card(m.keep)}</div><div class="muted small">Keep it in <b>${esc(m.deck)}</b>, remove the copy in <b>${esc(m.from)}</b></div></li>`).join('')}</ul></section>` : ''}
+    ${r.cardMerges.some((m) => !m.from) ? `<section class="panel"><h3>Cards saved twice</h3><ul class="dupe-list">${r.cardMerges.filter((m) => !m.from).map((m) => `<li><span class="muted small">${esc(m.deck)}</span><div>Keep ${card(m.keep)}</div>${dupKey(m.keep.term) === dupKey(m.drop.term) && dupKey(m.keep.def) === dupKey(m.drop.def) ? '' : `<div class="muted">Remove <s>${card(m.drop)}</s></div>`}</li>`).join('')}</ul></section>` : ''}
     <button class="btn primary block" id="doDedupe">Remove ${plural(r.count, 'duplicate')}</button>
     <p class="muted small center">The removal syncs to your other devices too.</p>
   `);
@@ -1198,8 +1214,19 @@ function replacePlain(raw, at, len, v) {
   if (idx[at] == null || idx[at + len - 1] == null) return raw;
   return raw.slice(0, idx[at]) + v + raw.slice(idx[at + len - 1] + 1);
 }
-function issuesHtml(c) {
-  const out = [];
+// Another card that is the same as this one, anywhere (shown while you add or edit cards).
+function findTwin(c) {
+  if (!dupKey(c.term) || !dupKey(c.def)) return null;
+  for (const d of state.decks) for (let i = 0; i < d.cards.length; i++) { const x = d.cards[i]; if (x !== c && sameCard(x, c)) return { d, i, x }; }
+  return null;
+}
+function twinHtml(c, deckId) {
+  const t = findTwin(c); if (!t) return '';
+  const where = t.d.id === deckId ? `Same as card ${t.i + 1} in this deck` : `Already in <b>${esc(t.d.name)}</b>`;
+  return `<div class="dup-note">${I.copy}<span class="iss-kind">Duplicate</span><span>${where}: <span lang="es">${rich(t.x.term)}</span> – ${rich(t.x.def)}</span><button type="button" class="chip ghost dup-del">Delete this card</button></div>`;
+}
+function issuesHtml(c, deckId) {
+  const out = [twinHtml(c, deckId)];
   for (const f of ['term', 'def']) {
     for (const x of spellIssues(f, c[f])) {
       const space = !x.word.trim();
@@ -1216,9 +1243,9 @@ function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label><div class="er-tr" hidden></div><div class="er-issues">${issuesHtml(c)}</div>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label><div class="er-tr" hidden></div><div class="er-issues">${issuesHtml(c, d.id)}</div>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
   const setRowImg = (r, c) => { r.querySelector('.er-img').outerHTML = erImg(c); };
-  const showIssues = (r, c) => { const box = r.querySelector('.er-issues'); const h = issuesHtml(c); if (box.innerHTML !== h) box.innerHTML = h; };
+  const showIssues = (r, c) => { const box = r.querySelector('.er-issues'); const h = issuesHtml(c, d.id); if (box.innerHTML !== h) box.innerHTML = h; };
   const showAllIssues = () => $$('.edit-row', rows).forEach((r) => { const c = d.cards.find((x) => x.id === r.dataset.id); if (c) showIssues(r, c); });
   const spellItems = (cs) => cs.flatMap((c) => [{ f: 'term', t: plain(c.term) }, { f: 'def', t: plain(c.def) }]);
   let spellWarned = false;
@@ -1299,8 +1326,10 @@ function deckEdit(id) {
     const [r, c] = rowCard(e.target) || []; const f = e.target.files[0]; e.target.value = '';
     if (c && f && await attachPhoto(c, f)) setRowImg(r, c);
   });
-  rows.addEventListener('mousedown', (e) => { if (e.target.closest('.issue .chip, .er-tr .chip')) e.preventDefault(); });
+  rows.addEventListener('mousedown', (e) => { if (e.target.closest('.issue .chip, .er-tr .chip, .dup-note .chip')) e.preventDefault(); });
   rows.addEventListener('click', (e) => {
+    const dd = e.target.closest('.dup-del');
+    if (dd) { dd.closest('.edit-row').querySelector('.er-del').click(); return; }
     const tp = e.target.closest('.tr-pick, .tr-x');
     if (tp) {
       const [r, c] = rowCard(tp) || []; if (!c) return;
