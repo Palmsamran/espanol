@@ -318,6 +318,16 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
 .ps-credit a { color: inherit; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .er-photo { cursor: pointer; }
+/* spelling issues */
+.er-issues { grid-column: 1 / -1; display: grid; gap: 6px; }
+.er-issues:empty { display: none; }
+.issue { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 14px; }
+.issue > svg { width: 16px; height: 16px; flex: none; }
+.iss-word s { text-decoration: line-through wavy; text-decoration-thickness: 1px; color: var(--text); }
+.iss-arrow { color: var(--muted); }
+.issue .chip { min-height: 30px; padding: 2px 10px; border: 1px solid var(--border); border-radius: 99px; background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.issue .chip:hover { border-color: var(--primary); }
+.issue .chip.ghost { background: transparent; color: var(--muted); font-weight: 500; margin-left: auto; }
 .er-img { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
 .er-img[hidden] { display: none; }
 .er-img .photo { width: 88px; height: 66px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }

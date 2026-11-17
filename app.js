@@ -78,10 +78,10 @@ const STARTER = [
 /* ---------- state ---------- */
 const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
 // Settings that sync between devices (voice and install hint stay per-device).
-const SYNCED_SETTINGS = ['direction', 'flipDirection', 'photoSide', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
+const SYNCED_SETTINGS = ['direction', 'flipDirection', 'photoSide', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme', 'spellCheck', 'spellIgnore'];
 const defaultSettings = () => ({
   direction: 'es-en', flipDirection: 'en-es', photoSide: 'en', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
-  rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false, updated: 0,
+  rate: 0.9, newPerDay: 20, theme: 'system', spellCheck: true, spellIgnore: [], hideInstallHint: false, updated: 0,
 });
 const defaultStats = () => ({ history: {} });
 const freshSrs = () => ({ due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, last: 0 });
@@ -926,16 +926,97 @@ function deckView(id) {
   };
 }
 
+/* ---------- spelling check ---------- */
+// Uses LanguageTool's free public service. Only the card's words are sent, and only when checking.
+const spellCache = new Map(); // `${lang}|${text}` -> issues [{at, len, word, reps}]
+const SPELL_LANG = { term: 'es', def: 'en-US' };
+const spellKey = (f, t) => `${SPELL_LANG[f]}|${t}`;
+const isIgnored = (w) => (state.settings.spellIgnore || []).includes(w.trim().toLowerCase());
+async function spellRequest(lang, batch) {
+  const text = batch.join('\n\n');
+  const body = new URLSearchParams({ text, language: lang, disabledRules: 'UPPERCASE_SENTENCE_START,PUNCTUATION_PARAGRAPH_END' });
+  const res = await fetch('https://api.languagetool.org/v2/check', { method: 'POST', body });
+  if (res.status === 429) throw new Error('busy');
+  if (!res.ok) throw new Error(String(res.status));
+  const data = await res.json();
+  const found = batch.map(() => []);
+  const starts = []; let pos = 0;
+  batch.forEach((t) => { starts.push(pos); pos += t.length + 2; });
+  for (const m of data.matches || []) {
+    const type = m.rule?.issueType;
+    if (!['misspelling', 'whitespace', 'typographical'].includes(type)) continue;
+    let k = starts.length - 1; while (k > 0 && starts[k] > m.offset) k--;
+    const at = m.offset - starts[k];
+    if (at < 0 || at + m.length > batch[k].length) continue;
+    const word = batch[k].substr(at, m.length);
+    found[k].push({ at, len: m.length, word, reps: (m.replacements || []).slice(0, 4).map((r) => r.value).filter((v) => v !== word) });
+  }
+  batch.forEach((t, k) => spellCache.set(`${lang}|${t}`, found[k]));
+}
+// texts: [{f: 'term'|'def', t: plain text}] — fills the cache for anything not checked yet.
+async function spellCheck(items) {
+  for (const f of ['term', 'def']) {
+    const lang = SPELL_LANG[f];
+    const todo = [...new Set(items.filter((x) => x.f === f && x.t.trim() && !spellCache.has(spellKey(f, x.t))).map((x) => x.t))];
+    let batch = []; let size = 0;
+    for (const t of todo) {
+      if (batch.length && size + t.length > 10000) { await spellRequest(lang, batch); batch = []; size = 0; }
+      batch.push(t); size += t.length + 2;
+    }
+    if (batch.length) await spellRequest(lang, batch);
+  }
+}
+const spellIssues = (f, raw) => (spellCache.get(spellKey(f, plain(raw))) || []).filter((x) => !(x.word.trim() && isIgnored(x.word)));
+// Replace characters at a position in the plain text, keeping the formatting tags around it.
+const TAG_AT = new RegExp(`^(?:${FMT_RE.source})`, 'i');
+function replacePlain(raw, at, len, v) {
+  const idx = [];
+  for (let i = 0; i < raw.length;) { const m = TAG_AT.exec(raw.slice(i)); if (m) { i += m[0].length; continue; } idx.push(i); i++; }
+  if (idx[at] == null || idx[at + len - 1] == null) return raw;
+  return raw.slice(0, idx[at]) + v + raw.slice(idx[at + len - 1] + 1);
+}
+function issuesHtml(c) {
+  const out = [];
+  for (const f of ['term', 'def']) {
+    for (const x of spellIssues(f, c[f])) {
+      const space = !x.word.trim();
+      const fixes = space ? [`<button type="button" class="chip fix" data-f="${f}" data-at="${x.at}" data-len="${x.len}" data-v=" ">Fix</button>`]
+        : x.reps.map((v) => `<button type="button" class="chip fix" data-f="${f}" data-at="${x.at}" data-len="${x.len}" data-v="${esc(v)}" ${f === 'term' ? 'lang="es"' : ''}>${esc(v)}</button>`);
+      out.push(`<div class="issue">${I.alert}<span class="iss-word" ${f === 'term' ? 'lang="es"' : ''}>${space ? 'Extra space' : `<s>${esc(x.word)}</s>`}</span>${fixes.length ? `<span class="iss-arrow">→</span>${fixes.join('')}` : '<span class="muted small">no suggestions</span>'}${space ? '' : `<button type="button" class="chip ghost ign" data-w="${esc(x.word)}">Ignore</button>`}</div>`);
+    }
+  }
+  return out.join('');
+}
+
 const erImg = (c) => `<div class="er-img" ${c.img ? '' : 'hidden'}>${c.img ? photoTag(c) : ''}<button type="button" class="btn sm ghost er-img-del">${I.x} Remove photo</button></div>`;
 function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label><div class="er-issues">${issuesHtml(c)}</div>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add your own photo" title="Add your own photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-search" aria-label="Search pictures" title="Search pictures">${I.search}</button><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
   const setRowImg = (r, c) => { r.querySelector('.er-img').outerHTML = erImg(c); };
+  const showIssues = (r, c) => { const box = r.querySelector('.er-issues'); const h = issuesHtml(c); if (box.innerHTML !== h) box.innerHTML = h; };
+  const showAllIssues = () => $$('.edit-row', rows).forEach((r) => { const c = d.cards.find((x) => x.id === r.dataset.id); if (c) showIssues(r, c); });
+  const spellItems = (cs) => cs.flatMap((c) => [{ f: 'term', t: plain(c.term) }, { f: 'def', t: plain(c.def) }]);
+  let spellWarned = false;
+  const spellFail = (err, loud) => {
+    if (!loud && spellWarned) return; spellWarned = true;
+    toast(!navigator.onLine ? 'Spelling check needs the internet' : err.message === 'busy' ? 'Spelling check is busy — try again in a minute' : 'Spelling check isn’t working right now');
+  };
+  // Check a card a moment after you leave one of its fields.
+  const pending = new Set(); let spellTimer;
+  const queueCheck = (c) => {
+    if (!state.settings.spellCheck) return;
+    pending.add(c); clearTimeout(spellTimer);
+    spellTimer = setTimeout(async () => {
+      const cs = [...pending]; pending.clear();
+      try { await spellCheck(spellItems(cs)); } catch (err) { spellFail(err, false); }
+      if (rows.isConnected) showAllIssues();
+    }, 400);
+  };
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
-    <div class="row gap wrap"><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
+    <div class="row gap wrap"><button class="btn sm ghost" id="checkAll">${I.check} Check spelling</button><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
     <div id="rows" class="edit-list">${d.cards.map(row).join('')}</div>
     <button class="btn block dashed" id="addRow">${I.plus} Add card</button>
     <div class="sticky-bottom">${fmtBar()}${accentBar()}<a class="btn primary" href="#/deck/${id}">Done</a></div>
@@ -955,6 +1036,11 @@ function deckEdit(id) {
     if (e.target.classList.contains('er-term')) c.term = val; else c.def = val;
     c.updated = Date.now();
     saveSoon();
+    showIssues(r, c);
+  });
+  rows.addEventListener('focusout', (e) => {
+    if (!e.target.classList?.contains('rt')) return;
+    const [, c] = rowCard(e.target) || []; if (c) queueCheck(c);
   });
   const rowCard = (el) => { const r = el.closest('.edit-row'); return r && [r, d.cards.find((x) => x.id === r.dataset.id)]; };
   rows.addEventListener('change', async (e) => {
@@ -962,7 +1048,26 @@ function deckEdit(id) {
     const [r, c] = rowCard(e.target) || []; const f = e.target.files[0]; e.target.value = '';
     if (c && f && await attachPhoto(c, f)) setRowImg(r, c);
   });
+  rows.addEventListener('mousedown', (e) => { if (e.target.closest('.issue .chip')) e.preventDefault(); });
   rows.addEventListener('click', (e) => {
+    const fx = e.target.closest('.fix');
+    if (fx) {
+      const [r, c] = rowCard(fx) || []; if (!c) return;
+      const f = fx.dataset.f; const at = +fx.dataset.at; const len = +fx.dataset.len;
+      const issue = spellIssues(f, c[f]).find((x) => x.at === at && x.len === len);
+      if (!issue || plain(c[f]).substr(at, len) !== issue.word) return;
+      c[f] = replacePlain(c[f], at, len, fx.dataset.v); c.updated = Date.now(); saveSoon();
+      r.querySelector(f === 'term' ? '.er-term' : '.er-def').innerHTML = rich(c[f]);
+      showIssues(r, c); queueCheck(c);
+      return;
+    }
+    const ig = e.target.closest('.ign');
+    if (ig) {
+      const w = ig.dataset.w.trim().toLowerCase(); const s = state.settings;
+      s.spellIgnore = [...new Set([...(s.spellIgnore || []), w])]; s.updated = Date.now(); save();
+      showAllIssues(); toast(`“${ig.dataset.w}” won’t be flagged again`);
+      return;
+    }
     const sb = e.target.closest('.er-search');
     if (sb) { const [r, c] = rowCard(sb) || []; if (c) photoSearch(c, () => setRowImg(r, c)); return; }
     const rm = e.target.closest('.er-img-del');
@@ -993,12 +1098,23 @@ function deckEdit(id) {
     document.execCommand('insertText', false, (e.clipboardData?.getData('text/plain') || '').replace(/\s+/g, ' '));
   });
   $('#addRow').onclick = addRow;
+  $('#checkAll').onclick = async (e) => {
+    const b = e.currentTarget; if (b.disabled) return;
+    const html = b.innerHTML; b.disabled = true; b.textContent = 'Checking…';
+    try {
+      await spellCheck(spellItems(d.cards));
+      showAllIssues();
+      const n = $$('.issue', rows).length;
+      if (!n) toast('No typos found ✓');
+      else { toast(`${n} possible typo${n === 1 ? '' : 's'} — tap a fix or Ignore`); $('.issue', rows).closest('.edit-row').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    } catch (err) { spellFail(err, true); } finally { if (b.isConnected) { b.disabled = false; b.innerHTML = html; } }
+  };
   $('#swapAll').onclick = () => {
     d.cards.forEach((c) => { [c.term, c.def] = [c.def, c.term]; c.updated = Date.now(); });
     save(); toast('Swapped Spanish and English'); deckEdit(id);
   };
   onCleanup(() => {
-    clearTimeout(saveTimer);
+    clearTimeout(saveTimer); clearTimeout(spellTimer);
     const empty = (c) => !c.term.trim() && !c.def.trim() && !c.img;
     d.cards.filter(empty).forEach((c) => tombstone('cards', c.id));
     d.cards = d.cards.filter((c) => !empty(c));
@@ -1688,6 +1804,8 @@ function settingsView() {
       <div class="field"><span>Photos show on</span>${seg('photoSide', [['en', 'English side'], ['es', 'Spanish side'], ['both', 'Both']], s.photoSide)}</div>
       <div class="field"><span>Typing &amp; quizzes: show first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
+      <label class="switch-row"><span><b>Check spelling as I type</b><small>Flags typos when you finish a field in the deck editor (sends the card's words to LanguageTool)</small></span><input type="checkbox" class="switch" name="spellCheck" ${s.spellCheck ? 'checked' : ''}></label>
+      ${(s.spellIgnore || []).length ? `<button class="btn sm ghost" type="button" id="clearIgnore">Stop ignoring ${s.spellIgnore.length} word${s.spellIgnore.length === 1 ? '' : 's'}</button>` : ''}
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>
     </section>
     ${canSpeak ? `<section class="panel"><h3>Pronunciation</h3>
@@ -1731,6 +1849,7 @@ function settingsView() {
   });
   const rateEl = $('[name=rate]', root);
   if (rateEl) rateEl.oninput = (e) => { $('#rateOut').textContent = `${(+e.target.value).toFixed(2)}×`; };
+  const ci = $('#clearIgnore'); if (ci) ci.onclick = () => { s.spellIgnore = []; s.updated = Date.now(); save(); toast('Ignored words cleared'); settingsView(); };
   const tv = $('#testVoice'); if (tv) tv.onclick = () => speak('Hola, ¿cómo estás? Mucho gusto.');
   if (canSpeak && !voices.length) {
     speechSynthesis.onvoiceschanged = () => { speechSynthesis.onvoiceschanged = null; if (location.hash.startsWith('#/settings')) settingsView(); };

@@ -14,6 +14,8 @@ A Spanish vocabulary practice app that runs in any browser and installs on your 
 
 Cards can have a **photo**: tap the picture button next to a card in the deck editor to take a photo or pick one, tap the 🔍 button to search free, openly licensed pictures (from [Openverse](https://openverse.org)) for the card's English word, or paste an image on a computer. Settings → *Photos show on* picks the English side, the Spanish side or both.
 
+**Spelling check**: in the deck editor, typos in the Spanish and the English are flagged when you leave a field (for example *cancion → canción*, *beutiful → beautiful*). Tap a suggestion to fix it, or *Ignore* to stop flagging that word on all your devices. *Check spelling* at the top checks the whole deck. The check uses [LanguageTool](https://languagetool.org)'s free service, so it needs the internet and sends the card's words (nothing else) there. You can turn the automatic check off in Settings → *Check spelling as I type*.
+
 There's also text formatting on cards (**bold**, *italic*, underline and highlight in yellow, green, blue or pink, from the buttons in the deck editor or ⌘B / ⌘I / ⌘U / ⌘⇧H), text-to-speech in Spain, Mexico or US Spanish, starred cards, an accent keyboard (á é í ó ú ü ñ ¿ ¡), dark mode, and import from Quizlet.
 
 ## Files
