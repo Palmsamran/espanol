@@ -46,6 +46,7 @@ const I = {
   download: svg('<path d="M12 4v12M7 11l5 5 5-5M4 20h16"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),
   trash: svg('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
+  image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>'),
   shuffle: svg('<path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
   swap: svg('<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>'),
   copy: svg('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/>'),
@@ -76,9 +77,9 @@ const STARTER = [
 /* ---------- state ---------- */
 const STARTER_IDX = new Map(STARTER.map(([t], i) => [t, i]));
 // Settings that sync between devices (voice and install hint stay per-device).
-const SYNCED_SETTINGS = ['direction', 'flipDirection', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
+const SYNCED_SETTINGS = ['direction', 'flipDirection', 'photoSide', 'reviewStyle', 'strictAccents', 'autoSpeak', 'voiceLang', 'rate', 'newPerDay', 'theme'];
 const defaultSettings = () => ({
-  direction: 'es-en', flipDirection: 'en-es', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
+  direction: 'es-en', flipDirection: 'en-es', photoSide: 'en', reviewStyle: 'flip', strictAccents: false, autoSpeak: false, voiceLang: 'es-ES', voiceName: '',
   rate: 0.9, newPerDay: 20, theme: 'system', hideInstallHint: false, updated: 0,
 });
 const defaultStats = () => ({ history: {} });
@@ -87,7 +88,7 @@ const freshSrs = () => ({ due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, la
 // `updated` = when the text/star last changed (used to merge edits from other devices)
 function normalizeCard(c = {}) {
   return {
-    id: c.id || uid(), term: String(c.term ?? ''), def: String(c.def ?? ''), starred: !!c.starred,
+    id: c.id || uid(), term: String(c.term ?? ''), def: String(c.def ?? ''), img: String(c.img || ''), starred: !!c.starred,
     updated: c.updated || 0, srs: Object.assign(freshSrs(), c.srs || {}),
   };
 }
@@ -106,7 +107,7 @@ function defaultState() {
     version: 1,
     decks: [normalizeDeck({ id: 'starter', name: 'Starter: Essentials', cards: STARTER.map(([term, def], i) => ({ id: `st${i}`, term, def })) })],
     settings: defaultSettings(), stats: defaultStats(),
-    deleted: { decks: {}, cards: {} }, progressResetAt: 0,
+    deleted: { decks: {}, cards: {} }, progressResetAt: 0, imgGist: '',
   };
 }
 // Older installs gave the starter deck random ids; give it fixed ids so it merges across devices.
@@ -128,6 +129,7 @@ function normalizeState(s) {
     stats: { history: (s.stats && s.stats.history) || {} },
     deleted: { decks: { ...(s.deleted?.decks || {}) }, cards: { ...(s.deleted?.cards || {}) } },
     progressResetAt: s.progressResetAt || 0,
+    imgGist: String(s.imgGist || ''), // private gist that holds the photos
   };
 }
 function tombstone(kind, id) { state.deleted[kind][id] = Date.now(); }
@@ -191,7 +193,7 @@ function syncPayload() {
   SYNCED_SETTINGS.forEach((k) => { settings[k] = state.settings[k]; });
   return JSON.stringify({
     version: 1, app: 'espanol', decks: state.decks, settings,
-    stats: { history: state.stats.history }, deleted: state.deleted, progressResetAt: state.progressResetAt,
+    stats: { history: state.stats.history }, deleted: state.deleted, progressResetAt: state.progressResetAt, imgGist: state.imgGist,
   });
 }
 
@@ -224,12 +226,14 @@ function mergeRemote(raw) {
         if (nc.srs.last && nc.srs.last <= resetAt) nc.srs = freshSrs();
         ld.cards.splice(prev + 1, 0, nc); byId.set(nc.id, nc); prev += 1; changed = true;
       } else {
-        if (rc.updated > lc.updated) { lc.term = rc.term; lc.def = rc.def; lc.starred = rc.starred; lc.updated = rc.updated; changed = true; }
+        if (rc.updated > lc.updated) { lc.term = rc.term; lc.def = rc.def; lc.img = rc.img; lc.starred = rc.starred; lc.updated = rc.updated; changed = true; }
         if (rc.srs.last > lc.srs.last && rc.srs.last > resetAt) { lc.srs = { ...rc.srs }; changed = true; }
         prev = ld.cards.indexOf(lc);
       }
     }
   }
+  // both devices made a photo gist at once: settle on one (photos get re-uploaded to it)
+  if (R.imgGist && R.imgGist !== L.imgGist && (!L.imgGist || R.imgGist < L.imgGist)) { L.imgGist = R.imgGist; changed = true; }
   const count = () => L.decks.length + L.decks.reduce((n, d) => n + d.cards.length, 0);
   const before = count();
   L.decks = L.decks.filter((d) => !(delD[d.id] >= d.updated));
@@ -265,9 +269,11 @@ async function runSync() {
     let changed = false;
     if (text) { try { changed = mergeRemote(JSON.parse(text)); } catch { /* unreadable remote: overwrite it */ } }
     if (changed) save({ silent: true });
+    try { await uploadPhotos(); } catch (e) { if (e.status === 401) throw e; /* photos retry next sync */ }
     const out = syncPayload();
     if (out !== text) await gh(`/gists/${sync.gistId}`, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILE]: { content: out } } }) });
     sync.lastSync = Date.now(); saveSync();
+    try { await downloadPhotos(); } catch { /* retry next sync */ }
     syncState.error = ''; setSyncStatus('ok');
     if (changed) refreshAfterSync();
   } catch (e) {
@@ -317,6 +323,135 @@ function ago(t) {
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return new Date(t).toLocaleDateString();
+}
+
+/* ---------- photos ----------
+   Pictures are shrunk to ≤640px JPEGs and kept in IndexedDB (localStorage is too small).
+   A card stores only the photo's id (card.img). For sync, each photo is one file
+   (img-<id>.txt, a data URL) in a second private gist, so the main sync file stays small
+   and a device only downloads the photos it doesn't have yet. */
+let imgDbP;
+const imgDb = () => (imgDbP ||= new Promise((res, rej) => {
+  const r = indexedDB.open('espanol-img', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('imgs', { keyPath: 'id' });
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+}));
+async function imgTx(mode, fn) {
+  const db = await imgDb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction('imgs', mode); const req = fn(tx.objectStore('imgs')); let out;
+    if (req) req.onsuccess = () => { out = req.result; };
+    tx.oncomplete = () => res(out); tx.onerror = () => rej(tx.error);
+  });
+}
+const imgCache = new Map(); // id -> data URL
+const imgKeys = () => imgTx('readonly', (st) => st.getAllKeys()).catch(() => []);
+const imgPut = (id, data) => { imgCache.set(id, data); return imgTx('readwrite', (st) => st.put({ id, data })); };
+const imgDel = (id) => { imgCache.delete(id); return imgTx('readwrite', (st) => st.delete(id)).catch(() => {}); };
+async function imgData(id) {
+  if (imgCache.has(id)) return imgCache.get(id);
+  const r = await imgTx('readonly', (st) => st.get(id)).catch(() => null);
+  if (r) imgCache.set(id, r.data);
+  return r ? r.data : null;
+}
+const photoIds = () => { const ids = new Set(); state.decks.forEach((d) => d.cards.forEach((c) => { if (c.img) ids.add(c.img); })); return ids; };
+// which side(s) of a card the photo appears on
+const showImg = (c, isEs) => !!(c && c.img) && (state.settings.photoSide === 'both' || (state.settings.photoSide === 'es') === isEs);
+const photoTag = (c, cls = '') => `<img class="photo ${cls}" data-img="${esc(c.img)}" alt="" draggable="false">`;
+// fill in <img data-img> elements as they appear
+function hydrateImgs(root = document) {
+  $$('img[data-img]:not([data-h])', root).forEach(async (im) => {
+    im.dataset.h = '1';
+    const d = await imgData(im.dataset.img);
+    if (d) im.src = d; else im.classList.add('missing');
+  });
+}
+new MutationObserver(() => hydrateImgs()).observe(document.body, { childList: true, subtree: true });
+
+async function shrinkPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, 640 / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(img.naturalWidth * k)); cv.height = Math.max(1, Math.round(img.naturalHeight * k));
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', 0.75);
+  } finally { URL.revokeObjectURL(url); }
+}
+async function attachPhoto(card, file) {
+  if (!file || !/^image\//.test(file.type)) { toast('That file isn’t a picture'); return false; }
+  let data;
+  try { data = await shrinkPhoto(file); } catch { toast('Couldn’t read that picture'); return false; }
+  const id = uid();
+  try { await imgPut(id, data); } catch { toast('Couldn’t save the photo — storage is full or blocked'); return false; }
+  const old = card.img;
+  card.img = id; card.updated = Date.now(); save();
+  if (old) imgDel(old);
+  navigator.storage?.persist?.().catch(() => {});
+  return true;
+}
+function removePhoto(card) {
+  if (!card.img) return;
+  const old = card.img; card.img = ''; card.updated = Date.now(); save(); imgDel(old);
+}
+
+const IMG_FILE = (id) => `img-${id}.txt`;
+function photoSyncState() {
+  if (sync.imgFor !== state.imgGist) { sync.imgFor = state.imgGist; sync.imgRemote = []; }
+  return new Set(sync.imgRemote || []); // photos known to be in the gist
+}
+// Upload photos the gist doesn't have yet (runs before the main data is written,
+// so other devices never see a card whose photo isn't uploaded).
+async function uploadPhotos() {
+  const remote = photoSyncState();
+  const local = new Set(await imgKeys());
+  const todo = [...photoIds()].filter((id) => local.has(id) && !remote.has(id));
+  if (!todo.length) return;
+  if (!state.imgGist) {
+    const g = await gh('/gists', {
+      method: 'POST',
+      body: JSON.stringify({ description: 'Español app — synced photos', public: false, files: { 'README.md': { content: 'Photos for the Español app. Each img-*.txt file holds one picture.' } } }),
+    });
+    state.imgGist = g.id; save({ silent: true }); photoSyncState();
+  }
+  for (let i = 0; i < todo.length; i += 8) {
+    const files = {};
+    for (const id of todo.slice(i, i + 8)) { const d = await imgData(id); if (d) files[IMG_FILE(id)] = { content: d }; }
+    try { await gh(`/gists/${state.imgGist}`, { method: 'PATCH', body: JSON.stringify({ files }) }); }
+    catch (e) { if (e.status === 404) { state.imgGist = ''; save({ silent: true }); } throw e; }
+    Object.keys(files).forEach((f) => remote.add(f.slice(4, -4)));
+    sync.imgRemote = [...remote]; saveSync();
+  }
+}
+// Download missing photos, then clean up photos no card uses any more.
+async function downloadPhotos() {
+  if (!state.imgGist || !sync.login) return;
+  const remote = photoSyncState();
+  const local = new Set(await imgKeys());
+  const missing = [...photoIds()].filter((id) => !local.has(id));
+  for (let i = 0; i < missing.length; i += 6) {
+    await Promise.all(missing.slice(i, i + 6).map(async (id) => {
+      try {
+        const res = await fetch(`https://gist.githubusercontent.com/${encodeURIComponent(sync.login)}/${state.imgGist}/raw/${IMG_FILE(id)}?t=${Date.now()}`);
+        if (!res.ok) return;
+        const data = await res.text();
+        if (!data.startsWith('data:image/')) return;
+        await imgPut(id, data); remote.add(id); local.add(id);
+        $$(`img[data-img="${id}"]`).forEach((im) => { im.src = data; im.classList.remove('missing'); });
+      } catch { /* try again next sync */ }
+    }));
+  }
+  const used = photoIds();
+  const stale = [...remote].filter((id) => !used.has(id));
+  if (stale.length) {
+    const files = {}; stale.slice(0, 50).forEach((id) => { files[IMG_FILE(id)] = null; });
+    try { await gh(`/gists/${state.imgGist}`, { method: 'PATCH', body: JSON.stringify({ files }) }); } catch { /* already gone */ }
+    Object.keys(files).forEach((f) => remote.delete(f.slice(4, -4)));
+  }
+  for (const id of local) if (!used.has(id)) await imgDel(id);
+  sync.imgRemote = [...remote]; saveSync();
 }
 
 const getDeck = (id) => {
@@ -712,7 +847,7 @@ function deckView(id) {
       <h3>${plural(valid.length, 'card')}</h3>
       <div class="row gap"><a class="btn sm ghost" href="#/import/${d.id}">${I.upload} Add</a><a class="btn sm" href="#/deck/${d.id}/edit">${I.edit} Edit</a></div>
     </div>
-    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${status(c)}" title="${status(c)}"></span><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
+    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${status(c)}" title="${status(c)}"></span>${c.img ? photoTag(c, 'cr-img') : ''}<div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
     <div class="danger-row">
       <button class="btn sm ghost" id="copyText">${I.copy} Copy as text</button>
       <button class="btn sm ghost danger" id="delDeck">${I.trash} Delete deck</button>
@@ -730,11 +865,13 @@ function deckView(id) {
   };
 }
 
+const erImg = (c) => `<div class="er-img" ${c.img ? '' : 'hidden'}>${c.img ? photoTag(c) : ''}<button type="button" class="btn sm ghost er-img-del">${I.x} Remove photo</button></div>`;
 function deckEdit(id) {
   const d = getDeck(id); if (!d) return;
   setHeader('Edit deck', `#/deck/${id}`);
   if (!d.cards.length) d.cards.push(makeCard());
-  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label></div><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div>`;
+  const row = (c, i) => `<div class="edit-row" data-id="${c.id}"><span class="er-num">${i + 1}</span><div class="er-fields"><label><span>Spanish</span><div class="er-term rt" contenteditable="true" role="textbox" aria-label="Spanish" lang="es" autocapitalize="off" spellcheck="false" enterkeyhint="next">${rich(c.term)}</div></label><label><span>English</span><div class="er-def rt" contenteditable="true" role="textbox" aria-label="English" autocapitalize="off" enterkeyhint="next">${rich(c.def)}</div></label>${erImg(c)}</div><div class="er-btns"><label class="icon-btn er-photo" aria-label="Add photo" title="Add photo">${I.image}<input type="file" accept="image/*" hidden></label><button type="button" class="icon-btn er-del" aria-label="Delete card">${I.trash}</button></div></div>`;
+  const setRowImg = (r, c) => { r.querySelector('.er-img').outerHTML = erImg(c); };
   render(`
     <label class="field"><span>Deck name</span><input id="deckName" value="${esc(d.name)}" autocomplete="off"></label>
     <div class="row gap wrap"><button class="btn sm ghost" id="swapAll">${I.swap} Swap columns</button><a class="btn sm ghost" href="#/import/${id}">${I.upload} Bulk import</a></div>
@@ -751,13 +888,22 @@ function deckEdit(id) {
   };
   $('#deckName').oninput = (e) => { d.name = e.target.value.trim() || 'Untitled deck'; d.updated = Date.now(); saveSoon(); };
   rows.addEventListener('input', (e) => {
+    if (!e.target.classList.contains('rt')) return;
     const r = e.target.closest('.edit-row'); const c = r && d.cards.find((x) => x.id === r.dataset.id); if (!c) return;
     const val = serializeRich(e.target);
     if (e.target.classList.contains('er-term')) c.term = val; else c.def = val;
     c.updated = Date.now();
     saveSoon();
   });
+  const rowCard = (el) => { const r = el.closest('.edit-row'); return r && [r, d.cards.find((x) => x.id === r.dataset.id)]; };
+  rows.addEventListener('change', async (e) => {
+    if (e.target.type !== 'file') return;
+    const [r, c] = rowCard(e.target) || []; const f = e.target.files[0]; e.target.value = '';
+    if (c && f && await attachPhoto(c, f)) setRowImg(r, c);
+  });
   rows.addEventListener('click', (e) => {
+    const rm = e.target.closest('.er-img-del');
+    if (rm) { const [r, c] = rowCard(rm) || []; if (c) { removePhoto(c); setRowImg(r, c); } return; }
     const b = e.target.closest('.er-del'); if (!b) return;
     const r = b.closest('.edit-row');
     tombstone('cards', r.dataset.id); d.cards = d.cards.filter((x) => x.id !== r.dataset.id); r.remove(); renumber(); saveSoon();
@@ -779,6 +925,8 @@ function deckEdit(id) {
   rows.addEventListener('paste', (e) => { // paste as plain text
     if (!e.target.closest('.rt')) return;
     e.preventDefault();
+    const file = [...(e.clipboardData?.files || [])].find((f) => /^image\//.test(f.type));
+    if (file) { const [r, c] = rowCard(e.target) || []; if (c) attachPhoto(c, file).then((ok) => { if (ok) setRowImg(r, c); }); return; }
     document.execCommand('insertText', false, (e.clipboardData?.getData('text/plain') || '').replace(/\s+/g, ' '));
   });
   $('#addRow').onclick = addRow;
@@ -788,8 +936,9 @@ function deckEdit(id) {
   };
   onCleanup(() => {
     clearTimeout(saveTimer);
-    d.cards.filter((c) => !c.term.trim() && !c.def.trim()).forEach((c) => tombstone('cards', c.id));
-    d.cards = d.cards.filter((c) => c.term.trim() || c.def.trim());
+    const empty = (c) => !c.term.trim() && !c.def.trim() && !c.img;
+    d.cards.filter(empty).forEach((c) => tombstone('cards', c.id));
+    d.cards = d.cards.filter((c) => !empty(c));
     save();
   });
 }
@@ -919,7 +1068,7 @@ function choicesFor(it, pool) {
 }
 
 function questionCard(it, hint) {
-  return `<div class="q-card"><span class="face-label">${hint}</span><div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>`;
+  return `<div class="q-card"><span class="face-label">${hint}</span>${showImg(it.c, it.promptEs) ? photoTag(it.c, 'q-img') : ''}<div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>`;
 }
 
 function mcQuestion(el, it, options, done) {
@@ -988,7 +1137,8 @@ function writtenQuestion(el, it, done) {
 }
 
 function faceHtml(c, text, isEs, front) {
-  return `<div class="face-inner"><span class="face-label">${isEs ? 'Español' : 'English'}</span><div class="face-text ${plain(text).length > 36 ? 'long' : ''}" ${langAttr(isEs)}>${rich(text)}</div><div class="face-actions">${isEs ? sayBtn(text) : ''}${front ? starBtn(c) : ''}</div></div>`;
+  const pic = showImg(c, isEs);
+  return `<div class="face-inner ${pic ? 'with-img' : ''}">${pic ? photoTag(c, 'face-img') : ''}<span class="face-label">${isEs ? 'Español' : 'English'}</span><div class="face-text ${plain(text).length > 36 ? 'long' : ''}" ${langAttr(isEs)}>${rich(text)}</div><div class="face-actions">${isEs ? sayBtn(text) : ''}${front ? starBtn(c) : ''}</div></div>`;
 }
 
 /* ---------- views: flashcards ---------- */
@@ -1306,7 +1456,7 @@ function reviewView(q) {
     if (flipStyle) return showFlip(c, d, it, isNew);
     render(`
       ${progressTop(done, done + queue.length, `${queue.length} left`)}
-      <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span><div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
+      <div class="q-card"><span class="face-label">${isNew ? '<span class="tag new">NEW</span> ' : ''}${deckId ? '' : esc(d.name)}</span>${showImg(c, it.promptEs) ? photoTag(c, 'q-img') : ''}<div class="q-text" ${langAttr(it.promptEs)}>${rich(it.prompt)}</div>${it.promptEs ? sayBtn(it.prompt) : ''}</div>
       <form class="answer-form" id="rf" autocomplete="off">
         <input class="answer-input" ${langAttr(ansEs)} placeholder="Type the ${ansEs ? 'Spanish' : 'English'} (optional)" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done">
         <button class="btn primary" type="submit" id="showBtn">Show</button>
@@ -1340,7 +1490,7 @@ function reviewView(q) {
       else if (res === 'typo') note = '<p class="muted">Close — check the spelling.</p>';
       const labels = [['Again', 'again'], ['Hard', 'hard'], ['Good', 'good'], ['Easy', 'easy']];
       $('#reveal').innerHTML = `
-        <div class="answer-card"><span class="face-label">Answer</span><div class="a-text" ${langAttr(ansEs)}>${rich(it.answer)}</div>${ansEs ? sayBtn(it.answer) : ''}${note}</div>
+        <div class="answer-card"><span class="face-label">Answer</span>${showImg(c, ansEs) ? photoTag(c, 'a-img') : ''}<div class="a-text" ${langAttr(ansEs)}>${rich(it.answer)}</div>${ansEs ? sayBtn(it.answer) : ''}${note}</div>
         <div class="srs-row">${labels.map(([l, k], n) => `<button type="button" class="srs ${k} ${n === suggested ? 'suggested' : ''}" data-q="${n}"><b>${l}</b><span>${fmtInterval(c.srs, n)}</span></button>`).join('')}</div>
         <p class="srs-help">How well did you remember it?${isTouch() ? '' : ' Keys 1–4.'}</p>`;
       if (state.settings.autoSpeak && ansEs) speak(it.answer);
@@ -1472,6 +1622,7 @@ function settingsView() {
     <section class="panel"><h3>Practice</h3>
       <div class="field"><span>Daily review</span>${seg('reviewStyle', [['flip', 'Flip cards'], ['type', 'Type answers']], s.reviewStyle)}</div>
       <div class="field"><span>Flip cards: show first</span>${seg('flipDirection', [['en-es', 'English'], ['es-en', 'Spanish'], ['mixed', 'Mixed']], s.flipDirection)}</div>
+      <div class="field"><span>Photos show on</span>${seg('photoSide', [['en', 'English side'], ['es', 'Spanish side'], ['both', 'Both']], s.photoSide)}</div>
       <div class="field"><span>Typing &amp; quizzes: show first</span>${seg('direction', [['es-en', 'Spanish'], ['en-es', 'English'], ['mixed', 'Mixed']], s.direction)}</div>
       <label class="switch-row"><span><b>Strict accents</b><small>Count “esta” as wrong when the answer is “está”</small></span><input type="checkbox" class="switch" name="strictAccents" ${s.strictAccents ? 'checked' : ''}></label>
       <label class="field"><span>New cards per day (Review)</span><input type="number" inputmode="numeric" name="newPerDay" min="0" max="500" value="${s.newPerDay}" class="sm-input"></label>

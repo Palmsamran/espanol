@@ -291,7 +291,22 @@ input[type="range"] { padding: 0; border: 0; background: transparent; accent-col
   padding: 8px 10px; min-height: 40px; border-radius: 10px; line-height: 1.5; overflow-wrap: anywhere; cursor: text;
 }
 .er-fields .rt:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
-.er-del { margin-top: 18px; }
+.er-btns { display: flex; flex-direction: column; margin-top: 14px; }
+.er-photo { cursor: pointer; }
+.er-img { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+.er-img[hidden] { display: none; }
+.er-img .photo { width: 88px; height: 66px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }
+
+/* photos */
+.photo { display: block; background: var(--surface-2); }
+.photo.missing { min-height: 60px; }
+.face-inner.with-img { justify-content: center; gap: 10px; }
+.face-img { max-width: 100%; max-height: 58%; min-height: 0; object-fit: contain; border-radius: 12px; margin-top: 14px; background: none; }
+.face-inner.with-img .face-text { font-size: clamp(22px, 5.5vw, 32px); }
+.face-inner.with-img .face-text.long { font-size: clamp(17px, 4.2vw, 22px); }
+.q-img { align-self: center; max-width: 100%; max-height: 200px; object-fit: contain; border-radius: 12px; margin: 0 auto 12px; background: none; }
+.a-img { max-width: 100%; max-height: 160px; object-fit: contain; border-radius: 10px; margin: 8px auto 4px; background: none; }
+.cr-img { width: 44px; height: 44px; flex: none; object-fit: cover; border-radius: 8px; }
 @media (max-width: 520px) {
   .er-fields { grid-template-columns: 1fr; }
   .er-num { padding-top: 24px; }
