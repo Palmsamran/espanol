@@ -991,6 +991,30 @@ function deckTile(d) {
   return `<a class="deck-tile" href="#/deck/${d.id}"><h4>${esc(d.name)}</h4><p class="muted">${plural(r.total, 'card')}${r.due ? ` · <span class="due">${r.due} due</span>` : ''}</p>${progressBar(r)}</a>`;
 }
 
+// Decks named with a date (2026/11/17, 2026-11-17, 2026.11.17, also with extra words) are listed newest first;
+// decks without a date come after them in their usual order.
+const DECK_DATE_RE = /(\d{4})([\/\-.])(\d{1,2})([\/\-.])(\d{1,2})(?!\d)/;
+function deckDate(name) {
+  const m = DECK_DATE_RE.exec(name || ''); if (!m) return 0;
+  const mo = +m[3]; const da = +m[5];
+  return mo >= 1 && mo <= 12 && da >= 1 && da <= 31 ? +m[1] * 10000 + mo * 100 + da : 0;
+}
+function sortedDecks() {
+  return state.decks.map((d, i) => ({ d, i, t: deckDate(d.name) }))
+    .sort((a, b) => (b.t - a.t) || (a.t ? (b.d.created || 0) - (a.d.created || 0) : a.i - b.i)).map((x) => x.d);
+}
+// A new deck is named with today's date, written the same way as your newest dated deck.
+function newDeckName() {
+  const dated = sortedDecks().find((d) => deckDate(d.name));
+  if (!dated) return 'New deck';
+  const m = DECK_DATE_RE.exec(dated.name); const now = new Date();
+  const pad = (n, like) => (like.length > 1 ? String(n).padStart(2, '0') : String(n));
+  const base = `${now.getFullYear()}${m[2]}${pad(now.getMonth() + 1, m[3])}${m[4]}${pad(now.getDate(), m[5])}`;
+  const taken = new Set(state.decks.map((d) => d.name.trim().toLowerCase()));
+  let name = base; for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${base} (${n})`;
+  return name;
+}
+
 function home() {
   setHeader('Español', null);
   const now = Date.now(); let due = 0; let fresh = 0;
@@ -1022,11 +1046,11 @@ function home() {
       <h3>Your decks</h3>
       <div class="row gap"><a class="btn sm ghost" href="#/import">${I.upload} Import</a><button class="btn sm" id="newDeck">${I.plus} New</button></div>
     </div>
-    <div class="deck-list">${state.decks.map(deckTile).join('') || '<p class="empty">No decks yet. Create one or import from Quizlet.</p>'}</div>
+    <div class="deck-list">${sortedDecks().map(deckTile).join('') || '<p class="empty">No decks yet. Create one or import from Quizlet.</p>'}</div>
     <p class="sync-line" id="syncLine">${syncLineHtml()}</p>
   `);
   $('#newDeck').onclick = () => {
-    const d = makeDeck({ name: 'New deck', cards: [makeCard()] });
+    const d = makeDeck({ name: newDeckName(), cards: [makeCard()] });
     state.decks.unshift(d); save(); location.hash = `#/deck/${d.id}/edit`;
   };
   const hd = $('#hideDupes');

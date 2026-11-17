@@ -38,6 +38,8 @@ It syncs when the app opens, when you switch back to it, and a few seconds after
 
 Photos sync too. They're shrunk to small JPEGs when added and kept in a second private gist ("Español app — synced photos"), one file per photo, so each device only downloads the photos it's missing. Backup files contain your cards but not the photos.
 
+**Deck order**: decks with a date in their name (*2026/11/17*, *2026-11-17* or *2026.11.17*, with or without extra words) are listed newest first on the home screen, and decks without a date come after them. **New** names a deck with today's date, written the same way as your newest dated deck.
+
 **Duplicates**: if the same deck ends up on the list twice (for example a Quizlet set imported on two devices and then combined by sync), or the same card is saved twice (in one deck or in two different decks), the home screen shows *Found N duplicates → Review & remove*. Settings → *Find & remove duplicates* does the same. Decks with the same name are merged. Cards are matched even if one copy was corrected (*naturalesa* / *naturaleza*). For each pair, the most recently edited text is kept, along with stars, photos and the latest study progress. When the same card is in two decks, the copy in the older deck is kept as it is. The removal syncs to other devices. The deck editor also flags a card as soon as you add one that already exists ("Duplicate: Already in Starter: Essentials"), with a button to delete it.
 
 **Settings → Save backup file / Restore from backup** still work if you just want a copy of your data as a file.
