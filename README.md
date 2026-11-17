@@ -38,6 +38,8 @@ It syncs when the app opens, when you switch back to it, and a few seconds after
 
 Photos sync too. They're shrunk to small JPEGs when added and kept in a second private gist ("Español app — synced photos"), one file per photo, so each device only downloads the photos it's missing. Backup files contain your cards but not the photos.
 
+**Duplicates**: if the same deck ends up on the list twice (for example a Quizlet set imported on two devices and then combined by sync), or a deck has the same card twice, the home screen shows *Found N duplicates → Review & remove*. Settings → *Find & remove duplicates* does the same. Decks with the same name are merged. Cards are matched even if one copy was corrected (*naturalesa* / *naturaleza*). For each pair, the most recently edited text is kept, along with stars, photos and the latest study progress. The removal syncs to other devices.
+
 **Settings → Save backup file / Restore from backup** still work if you just want a copy of your data as a file.
 
 ## Putting it online (needed to install on a phone)

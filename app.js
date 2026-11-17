@@ -843,6 +843,7 @@ const routes = [
   [/^#\/review$/, (q) => reviewView(q)],
   [/^#\/import(?:\/(\w+))?$/, (id) => importView(id)],
   [/^#\/settings$/, () => settingsView()],
+  [/^#\/dupes$/, () => dupesView()],
 ];
 function route() {
   cleanups.forEach((f) => { try { f(); } catch (e) { console.error(e); } });
@@ -857,6 +858,107 @@ function route() {
   location.hash = '#/';
 }
 window.addEventListener('hashchange', route);
+
+/* ---------- duplicates ---------- */
+// Finds decks with the same name and cards that are the same (e.g. a Quizlet set imported on two devices and
+// then combined by sync), including a corrected copy next to the original ("naturaleza" vs "naturalesa").
+const dupKeyMemo = new Map();
+function dupKey(s) {
+  s = String(s ?? ''); let k = dupKeyMemo.get(s);
+  if (k === undefined) { k = plain(s).toLowerCase().normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); if (dupKeyMemo.size > 5000) dupKeyMemo.clear(); dupKeyMemo.set(s, k); }
+  return k;
+}
+function nearText(a, b) {
+  const x = dupKey(a); const y = dupKey(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return lev(x, y) <= Math.max(2, Math.floor(Math.max(x.length, y.length) * 0.4));
+}
+// Same card: one side identical and the other side identical or only slightly different (a typo fix).
+const sameCard = (a, b) => (dupKey(a.term) && dupKey(a.term) === dupKey(b.term) && nearText(a.def, b.def))
+  || (dupKey(a.def) && dupKey(a.def) === dupKey(b.def) && nearText(a.term, b.term));
+// Fold card o into card k: the most recent text wins; keep stars, photos and the latest study progress.
+function absorbCard(k, o) {
+  if (o.updated > k.updated) { k.term = o.term; k.def = o.def; if (o.img) k.img = o.img; }
+  if (!k.img && o.img) k.img = o.img;
+  k.starred = k.starred || o.starred;
+  if (o.srs.last > k.srs.last) k.srs = { ...o.srs };
+  k.updated = Date.now();
+}
+// Works on the decks it is given (pass a copy for a dry run). Returns the new deck list, what was merged,
+// and the ids to record as deleted so other devices drop them too.
+function dedupe(decks) {
+  const tomb = { decks: [], cards: [] }; const deckMerges = []; const cardMerges = [];
+  const groups = new Map();
+  for (const d of decks) { const k = dupKey(d.name) || d.id; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
+  let drop = new Set();
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (a.created || 0) - (b.created || 0));
+    const keep = g[0];
+    for (const o of g.slice(1)) {
+      const used = new Set(); const sameLen = o.cards.length === keep.cards.length;
+      o.cards.forEach((oc, i) => {
+        const pos = sameLen ? keep.cards[i] : null; // same import → same order, even if one copy was corrected
+        let k = pos && !used.has(pos) && (nearText(pos.term, oc.term) || nearText(pos.def, oc.def)) ? pos : null;
+        if (!k) k = keep.cards.find((kc) => !used.has(kc) && sameCard(kc, oc));
+        if (k) { used.add(k); absorbCard(k, oc); } else if (dupKey(oc.term) || dupKey(oc.def) || oc.img) {
+          keep.cards.push(normalizeCard({ ...oc, id: uid(), srs: { ...oc.srs }, updated: Date.now() }));
+        }
+      });
+      tomb.decks.push(o.id); drop.add(o);
+    }
+    deckMerges.push({ id: keep.id, name: keep.name, copies: g.length });
+  }
+  decks = decks.filter((d) => !drop.has(d));
+  for (const d of decks) {
+    const out = [];
+    for (const c of d.cards) {
+      const k = (dupKey(c.term) || dupKey(c.def)) ? out.find((x) => sameCard(x, c)) : null;
+      if (!k) { out.push(c); continue; }
+      const newer = c.updated > k.updated ? c : k; const older = newer === c ? k : c;
+      cardMerges.push({ deck: d.name, keep: { term: newer.term, def: newer.def }, drop: { term: older.term, def: older.def } });
+      absorbCard(k, c); tomb.cards.push(c.id);
+    }
+    d.cards = out;
+  }
+  deckMerges.forEach((m) => { m.cards = decks.find((d) => d.id === m.id)?.cards.length || 0; });
+  const count = deckMerges.reduce((n, m) => n + m.copies - 1, 0) + cardMerges.length;
+  return { decks, tomb, deckMerges, cardMerges, count };
+}
+const findDupes = () => dedupe(JSON.parse(JSON.stringify(state.decks)));
+function removeDupes() {
+  const r = dedupe(state.decks);
+  state.decks = r.decks;
+  r.tomb.decks.forEach((id) => tombstone('decks', id));
+  r.tomb.cards.forEach((id) => tombstone('cards', id));
+  save();
+  return r.count;
+}
+const DUPE_HIDE_KEY = 'espanol.dupesHidden';
+const dupeSig = (r) => JSON.stringify([r.deckMerges.map((m) => [m.name, m.copies]), r.cardMerges.map((m) => [m.keep.term, m.drop.term])]);
+
+function dupesView() {
+  setHeader('Duplicates', '#/');
+  const r = findDupes();
+  if (!r.count) {
+    render(`<div class="panel center"><p>${I.check} No duplicate decks or cards found.</p><a class="btn" href="#/">Back to decks</a></div>`);
+    return;
+  }
+  const card = (c) => `<span lang="es">${rich(c.term) || '—'}</span> – ${rich(c.def) || '—'}`;
+  render(`
+    <p class="muted">These look like the same decks or cards saved twice, usually from importing on two devices and then combining them with sync. For each pair, the most recently edited version is kept (so your corrections stay), along with stars, photos and the latest study progress.</p>
+    ${r.deckMerges.length ? `<section class="panel"><h3>Decks saved more than once</h3><ul class="dupe-list">${r.deckMerges.map((m) => `<li><b>${esc(m.name)}</b> appears ${m.copies} times → becomes one deck of ${plural(m.cards, 'card')}</li>`).join('')}</ul></section>` : ''}
+    ${r.cardMerges.length ? `<section class="panel"><h3>Cards saved twice</h3><ul class="dupe-list">${r.cardMerges.map((m) => `<li><span class="muted small">${esc(m.deck)}</span><div>Keep ${card(m.keep)}</div>${dupKey(m.keep.term) === dupKey(m.drop.term) && dupKey(m.keep.def) === dupKey(m.drop.def) ? '' : `<div class="muted">Remove <s>${card(m.drop)}</s></div>`}</li>`).join('')}</ul></section>` : ''}
+    <button class="btn primary block" id="doDedupe">Remove ${plural(r.count, 'duplicate')}</button>
+    <p class="muted small center">The removal syncs to your other devices too.</p>
+  `);
+  $('#doDedupe').onclick = () => {
+    const n = removeDupes();
+    try { localStorage.removeItem(DUPE_HIDE_KEY); } catch { /* ignore */ }
+    toast(`Removed ${plural(n, 'duplicate')}`); location.hash = '#/';
+  };
+}
 
 /* ---------- views: home ---------- */
 function deckCounts(d) {
@@ -882,6 +984,10 @@ function home() {
   const streak = currentStreak();
   const studied = state.stats.history[dayKey()]?.reviews || 0;
   const showHint = !isStandalone() && isTouch() && !state.settings.hideInstallHint;
+  // Spot duplicate decks/cards (e.g. after combining two devices) and offer to clean them up.
+  const dupes = findDupes(); let hidden = '';
+  try { hidden = localStorage.getItem(DUPE_HIDE_KEY) || ''; } catch { /* ignore */ }
+  const dupeHint = dupes.count && hidden !== dupeSig(dupes) ? `<div class="install-hint dupe-hint">${I.copy}<span>Found ${plural(dupes.count, 'duplicate')} in your decks. <a href="#/dupes">Review &amp; remove</a></span><button class="icon-btn" id="hideDupes" aria-label="Dismiss">${I.x}</button></div>` : '';
   render(`
     <section class="hero">
       <div class="hero-top">
@@ -894,6 +1000,7 @@ function home() {
       </div>
       <a class="btn primary block" href="#/review" ${todo ? '' : 'aria-disabled="true" tabindex="-1"'}>${I.review} Start review</a>
     </section>
+    ${dupeHint}
     ${showHint ? `<div class="install-hint">${I.phone}<span>Add Español to your home screen. <a href="#/settings">How?</a></span><button class="icon-btn" id="hideHint" aria-label="Dismiss">${I.x}</button></div>` : ''}
     <div class="section-head">
       <h3>Your decks</h3>
@@ -906,6 +1013,8 @@ function home() {
     const d = makeDeck({ name: 'New deck', cards: [makeCard()] });
     state.decks.unshift(d); save(); location.hash = `#/deck/${d.id}/edit`;
   };
+  const hd = $('#hideDupes');
+  if (hd) hd.onclick = () => { try { localStorage.setItem(DUPE_HIDE_KEY, dupeSig(dupes)); } catch { /* ignore */ } hd.parentElement.remove(); };
   const hh = $('#hideHint');
   if (hh) hh.onclick = () => { state.settings.hideInstallHint = true; save(); hh.parentElement.remove(); };
 }
@@ -1973,6 +2082,7 @@ function settingsView() {
       <div class="stack">
         <button class="btn block" type="button" id="backup">${I.download} Save backup file</button>
         <label class="btn block ghost file-btn">${I.upload} Restore from backup<input type="file" id="restore" accept=".json,application/json" hidden></label>
+        <a class="btn block ghost" href="#/dupes">${I.copy} Find &amp; remove duplicates</a>
         <button class="btn block ghost danger" type="button" id="resetProg">Reset learning progress</button>
       </div>
     </section>
