@@ -88,10 +88,15 @@ const defaultStats = () => ({ history: {} });
 const freshSrs = () => ({ due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0, last: 0 });
 
 // `updated` = when the text/star last changed (used to merge edits from other devices)
+// "My words": m.fc / m.fx = last time known / missed on a flashcard, m.wr / m.wx = last time typed exactly
+// right / wrong, m.own / m.off = when it became yours / when you sent it back to practice. Only timestamps,
+// so two devices merge by keeping the latest of each.
+const M_KEYS = ['fc', 'fx', 'wr', 'wx', 'own', 'off'];
+const normM = (m) => Object.fromEntries(M_KEYS.map((k) => [k, (m && +m[k]) || 0]));
 function normalizeCard(c = {}) {
   return {
     id: c.id || uid(), term: String(c.term ?? ''), def: String(c.def ?? ''), img: String(c.img || ''), starred: !!c.starred,
-    updated: c.updated || 0, srs: Object.assign(freshSrs(), c.srs || {}),
+    updated: c.updated || 0, srs: Object.assign(freshSrs(), c.srs || {}), m: normM(c.m),
   };
 }
 function normalizeDeck(d = {}) {
@@ -254,6 +259,7 @@ function mergeRemote(raw) {
       } else {
         if (rc.updated > lc.updated) { lc.term = rc.term; lc.def = rc.def; lc.img = rc.img; lc.starred = rc.starred; lc.updated = rc.updated; changed = true; }
         if (rc.srs.last > lc.srs.last && rc.srs.last > resetAt) { lc.srs = { ...rc.srs }; changed = true; }
+        for (const k of M_KEYS) if (rc.m[k] > lc.m[k]) { lc.m[k] = rc.m[k]; changed = true; }
         prev = ld.cards.indexOf(lc);
       }
     }
@@ -592,6 +598,28 @@ function fmtInterval(srs, q) {
   return '1 year';
 }
 const status = (c) => (!c.srs.last ? 'new' : c.srs.interval >= 7 ? 'known' : 'learning');
+const isMine = (c) => c.m.own > c.m.off;
+const passedFc = (c) => c.m.fc > c.m.fx;
+const passedWr = (c) => c.m.wr > c.m.wx;
+const mineCount = () => state.decks.reduce((n, d) => n + d.cards.filter((c) => isValid(c) && isMine(c)).length, 0);
+// Record a flashcard ('fc') or typing ('wr') result. Knowing it on a flashcard AND typing it exactly right
+// (in any order) makes the word yours; missing it again undoes that step.
+function markPass(c, kind, ok) {
+  if (!c || isMine(c) || !isValid(c)) return;
+  const now = Date.now();
+  c.m[ok ? kind : (kind === 'fc' ? 'fx' : 'wx')] = now;
+  if (ok && passedFc(c) && passedWr(c)) {
+    c.m.own = now + 1;
+    toast(`🎉 “${plain(c.term)}” is now yours! You own ${plural(mineCount(), 'word')}.`);
+  }
+  saveSoon();
+}
+function wonHtml(t0) {
+  const w = [];
+  state.decks.forEach((d) => d.cards.forEach((c) => { if (isMine(c) && c.m.own >= t0) w.push(c); }));
+  if (!w.length) return '';
+  return `<div class="won"><b>🎉 ${plural(w.length, 'new word')} ${w.length === 1 ? 'is' : 'are'} now yours</b><div class="won-list" lang="es">${w.slice(0, 15).map((c) => rich(c.term)).join(' · ')}${w.length > 15 ? ' …' : ''}</div><a href="#/words">See all my words (${mineCount()})</a></div>`;
+}
 const isDue = (c, now = Date.now()) => !!c.srs.last && c.srs.due <= now;
 
 function touchStats(wasNew = false) {
@@ -628,7 +656,7 @@ function buildReviewQueue(deckId, extraNew = 0) {
   const decks = deckId ? state.decks.filter((d) => d.id === deckId) : state.decks;
   const now = Date.now(); const due = []; const fresh = [];
   for (const d of decks) for (const c of d.cards) {
-    if (!isValid(c)) continue;
+    if (!isValid(c) || isMine(c)) continue;
     if (isDue(c, now)) due.push({ c, d }); else if (!c.srs.last) fresh.push({ c, d });
   }
   const newLeft = Math.max(0, state.settings.newPerDay - newIntroducedToday()) + extraNew;
@@ -844,6 +872,7 @@ const routes = [
   [/^#\/import(?:\/(\w+))?$/, (id) => importView(id)],
   [/^#\/settings$/, () => settingsView()],
   [/^#\/dupes$/, () => dupesView()],
+  [/^#\/words$/, () => wordsView()],
 ];
 function route() {
   cleanups.forEach((f) => { try { f(); } catch (e) { console.error(e); } });
@@ -883,6 +912,7 @@ function absorbCard(k, o, keepText = false) {
   if (!k.img && o.img) k.img = o.img;
   k.starred = k.starred || o.starred;
   if (o.srs.last > k.srs.last) k.srs = { ...o.srs };
+  M_KEYS.forEach((x) => { if (o.m[x] > k.m[x]) k.m[x] = o.m[x]; });
   k.updated = Date.now();
 }
 // Works on the decks it is given (pass a copy for a dry run). Returns the new deck list, what was merged,
@@ -976,19 +1006,58 @@ function dupesView() {
   };
 }
 
+/* ---------- views: my words ---------- */
+function wordsView() {
+  setHeader('My words', '#/');
+  const all = [];
+  state.decks.forEach((d) => d.cards.forEach((c) => { if (isValid(c)) all.push({ c, d }); }));
+  const mine = all.filter((x) => isMine(x.c)).sort((a, b) => b.c.m.own - a.c.m.own);
+  const week = mine.filter((x) => x.c.m.own > Date.now() - 7 * 864e5).length;
+  const almost = all.filter((x) => !isMine(x.c) && passedFc(x.c) !== passedWr(x.c))
+    .sort((a, b) => Math.max(b.c.m.fc, b.c.m.wr) - Math.max(a.c.m.fc, a.c.m.wr));
+  const step = (ok, label) => `<span class="pill step ${ok ? 'ok' : ''}">${ok ? '✓' : '○'} ${label}</span>`;
+  render(`<div id="words">
+    <section class="words-hero">
+      <div class="words-ic">${I.trophy}</div>
+      <div class="words-num">${mine.length}</div>
+      <p>${mine.length === 1 ? 'word is' : 'words are'} yours${week ? ` · <b>+${week}</b> this week` : ''}</p>
+    </section>
+    <details class="help" ${mine.length ? '' : 'open'}>
+      <summary>How a word becomes yours</summary>
+      <ol>
+        <li><b>Know it on a flashcard:</b> tap <b>Know it</b> in Flashcards (or <b>Good</b> / <b>Easy</b> in Review).</li>
+        <li><b>Write it:</b> type it exactly right in <b>Write</b> or <b>Learn</b> (or when typing in Review). Small typos and missing accents don't count.</li>
+      </ol>
+      <p>Do both, in any order, and the word is yours. Getting it wrong again resets that step. Your words are left out of Review and practice, so you can focus on the rest.</p>
+    </details>
+    ${almost.length ? `<section class="panel"><h3>Almost yours (${almost.length})</h3><p class="muted small">One step done, one to go.</p><div class="card-list compact">${almost.slice(0, 60).map(({ c }) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div><div class="steps">${step(passedFc(c), 'Flashcard')}${step(passedWr(c), 'Write')}</div></div>`).join('')}</div></section>` : ''}
+    <section class="panel"><h3>Your words</h3>
+      ${mine.length ? `<div class="card-list compact">${mine.map(({ c, d }) => `<div class="card-row" data-id="${c.id}"><span class="dot mine"></span><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div><div class="muted small">${esc(d.name)} · since ${new Date(c.m.own).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</div></div>${sayBtn(c.term)}<button type="button" class="btn sm ghost unown">Practice again</button></div>`).join('')}</div>`
+        : '<p class="muted">No words yet. Open a deck, tap <b>Know it</b> on the words you know in Flashcards, then type them in Write. They’ll show up here.</p>'}
+    </section>
+  </div>`);
+  $('#words').addEventListener('click', (e) => {
+    const b = e.target.closest('.unown'); if (!b) return;
+    const id = b.closest('.card-row').dataset.id;
+    const hit = all.find((x) => x.c.id === id); if (!hit) return;
+    const now = Date.now(); Object.assign(hit.c.m, { off: now, fx: now, wx: now });
+    save(); toast(`“${plain(hit.c.term)}” is back in practice`); wordsView();
+  });
+}
+
 /* ---------- views: home ---------- */
 function deckCounts(d) {
-  const now = Date.now(); const r = { total: 0, new: 0, learning: 0, known: 0, due: 0 };
-  for (const c of d.cards) { if (!isValid(c)) continue; r.total++; r[status(c)]++; if (isDue(c, now)) r.due++; }
+  const now = Date.now(); const r = { total: 0, new: 0, learning: 0, known: 0, due: 0, mine: 0 };
+  for (const c of d.cards) { if (!isValid(c)) continue; r.total++; if (isMine(c)) { r.mine++; continue; } r[status(c)]++; if (isDue(c, now)) r.due++; }
   return r;
 }
 function progressBar(r) {
   const t = r.total || 1;
-  return `<div class="progress" role="img" aria-label="${r.known} known, ${r.learning} learning, ${r.new} new"><span class="p-known" style="width:${(r.known / t) * 100}%"></span><span class="p-learning" style="width:${(r.learning / t) * 100}%"></span></div>`;
+  return `<div class="progress" role="img" aria-label="${r.mine || 0} mine, ${r.known} known, ${r.learning} learning, ${r.new} new"><span class="p-mine" style="width:${((r.mine || 0) / t) * 100}%"></span><span class="p-known" style="width:${(r.known / t) * 100}%"></span><span class="p-learning" style="width:${(r.learning / t) * 100}%"></span></div>`;
 }
 function deckTile(d) {
   const r = deckCounts(d);
-  return `<a class="deck-tile" href="#/deck/${d.id}"><h4>${esc(d.name)}</h4><p class="muted">${plural(r.total, 'card')}${r.due ? ` · <span class="due">${r.due} due</span>` : ''}</p>${progressBar(r)}</a>`;
+  return `<a class="deck-tile" href="#/deck/${d.id}"><h4>${esc(d.name)}</h4><p class="muted">${plural(r.total, 'card')}${r.mine ? ` · <span class="mine-n">${r.mine} mine</span>` : ''}${r.due ? ` · <span class="due">${r.due} due</span>` : ''}</p>${progressBar(r)}</a>`;
 }
 
 // Decks named with a date (2026/11/17, 2026-11-17, 2026.11.17, also with extra words) are listed newest first;
@@ -1018,7 +1087,7 @@ function newDeckName() {
 function home() {
   setHeader('Español', null);
   const now = Date.now(); let due = 0; let fresh = 0;
-  for (const d of state.decks) for (const c of d.cards) { if (!isValid(c)) continue; if (isDue(c, now)) due++; else if (!c.srs.last) fresh++; }
+  for (const d of state.decks) for (const c of d.cards) { if (!isValid(c) || isMine(c)) continue; if (isDue(c, now)) due++; else if (!c.srs.last) fresh++; }
   const newToday = Math.min(fresh, Math.max(0, state.settings.newPerDay - newIntroducedToday()));
   const todo = due + newToday;
   const streak = currentStreak();
@@ -1036,7 +1105,10 @@ function home() {
           <h2>${todo ? `${plural(todo, 'card')} to review` : 'All caught up'}</h2>
           <p>${due} due · ${newToday} new · ${studied} answered today</p>
         </div>
-        <div class="streak ${streak ? 'on' : ''}">${I.flame}<b>${streak}</b><span>day streak</span></div>
+        <div class="hero-badges">
+          <a class="streak mine-badge" href="#/words" aria-label="My words">${I.trophy}<b>${mineCount()}</b><span>my words</span></a>
+          <div class="streak ${streak ? 'on' : ''}">${I.flame}<b>${streak}</b><span>day streak</span></div>
+        </div>
       </div>
       <a class="btn primary block" href="#/review" ${todo ? '' : 'aria-disabled="true" tabindex="-1"'}>${I.review} Start review</a>
     </section>
@@ -1060,7 +1132,7 @@ function home() {
 }
 
 /* ---------- views: deck ---------- */
-const ui = { starOnly: {} };
+const ui = { starOnly: {}, incMine: {} };
 function deckView(id) {
   const d = getDeck(id); if (!d) return;
   setHeader(d.name, '#/');
@@ -1068,7 +1140,9 @@ function deckView(id) {
   const valid = d.cards.filter(isValid);
   const starred = valid.filter((c) => c.starred).length;
   const so = !!ui.starOnly[id] && starred > 0;
-  const qs = so ? '?starred=1' : '';
+  const im = !!ui.incMine[id] && r.mine > 0;
+  const qp = [so && 'starred=1', im && 'mine=1'].filter(Boolean).join('&');
+  const qs = qp ? `?${qp}` : '';
   const reviewNow = r.due + Math.min(r.new, Math.max(0, state.settings.newPerDay - newIntroducedToday()));
   const modes = [
     ['flash', 'Flashcards', 'Flip and sort what you know', I.cards],
@@ -1078,17 +1152,18 @@ function deckView(id) {
   ];
   render(`
     <section class="deck-head">
-      <div class="stats3"><div><b>${r.new}</b><span>New</span></div><div><b>${r.learning}</b><span>Learning</span></div><div><b>${r.known}</b><span>Known</span></div></div>
+      <div class="stats3 stats4"><div><b>${r.new}</b><span>New</span></div><div><b>${r.learning}</b><span>Learning</span></div><div><b>${r.known}</b><span>Known</span></div><a href="#/words" class="stat-mine"><b>${r.mine}</b><span>Mine</span></a></div>
       ${progressBar(r)}
     </section>
     <a class="review-strip" href="#/review?deck=${d.id}">${I.review}<div><b>Review this deck</b><span>${reviewNow ? `${plural(reviewNow, 'card')} ready` : 'Nothing due'} · spaced repetition</span></div><span class="chev">›</span></a>
     <div class="mode-grid">${modes.map(([m, t, s, ic]) => `<a class="mode" href="#/deck/${d.id}/${m}${qs}"><span class="mode-ic">${ic}</span><b>${t}</b><span class="muted">${s}</span></a>`).join('')}</div>
     ${starred ? `<label class="switch-row"><span class="inline">${I.star} Study starred only (${starred})</span><input type="checkbox" id="starOnly" class="switch" ${so ? 'checked' : ''}></label>` : ''}
+    ${r.mine ? `<label class="switch-row"><span class="inline">${I.trophy} Practice my words too (${r.mine})</span><input type="checkbox" id="incMine" class="switch" ${im ? 'checked' : ''}></label>` : ''}
     <div class="section-head">
       <h3>${plural(valid.length, 'card')}</h3>
       <div class="row gap"><a class="btn sm ghost" href="#/import/${d.id}">${I.upload} Add</a><a class="btn sm" href="#/deck/${d.id}/edit">${I.edit} Edit</a></div>
     </div>
-    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${status(c)}" title="${status(c)}"></span>${c.img ? photoTag(c, 'cr-img') : ''}<div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
+    <div class="card-list">${valid.map((c) => `<div class="card-row"><span class="dot ${isMine(c) ? 'mine' : status(c)}" title="${isMine(c) ? 'mine' : status(c)}"></span>${c.img ? photoTag(c, 'cr-img') : ''}<div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}${starBtn(c)}</div>`).join('') || `<p class="empty">No cards yet. <a href="#/deck/${d.id}/edit">Add some</a>.</p>`}</div>
     <div class="danger-row">
       <button class="btn sm ghost" id="copyText">${I.copy} Copy as text</button>
       <button class="btn sm ghost danger" id="delDeck">${I.trash} Delete deck</button>
@@ -1096,6 +1171,8 @@ function deckView(id) {
   `);
   const soEl = $('#starOnly');
   if (soEl) soEl.onchange = () => { ui.starOnly[id] = soEl.checked; deckView(id); };
+  const imEl = $('#incMine');
+  if (imEl) imEl.onchange = () => { ui.incMine[id] = imEl.checked; deckView(id); };
   $('#copyText').onclick = async () => {
     const text = valid.map((c) => `${c.term}\t${c.def}`).join('\n');
     try { await navigator.clipboard.writeText(text); toast('Copied — paste it anywhere'); } catch { toast('Copy failed'); }
@@ -1526,11 +1603,17 @@ function importView(deckId) {
 
 /* ---------- study helpers ---------- */
 function studyCards(d, q) {
-  const cs = d.cards.filter(isValid);
+  let cs = d.cards.filter(isValid);
+  if (!(q && q.get('mine'))) cs = cs.filter((c) => !isMine(c));
   if (q && q.get('starred')) { const s = cs.filter((c) => c.starred); if (s.length) return s; }
   return cs;
 }
 function emptyStudy(d, msg) {
+  const valid = d.cards.filter(isValid);
+  if (valid.length && valid.every(isMine)) {
+    render(`<div class="empty-state"><div class="big-ic">${I.trophy}</div><h2>¡Todas son tuyas!</h2><p>Every word in this deck is one of your words, so there's nothing left to practice. To go over them anyway, turn on <b>Practice my words too</b> on the deck page.</p><a class="btn primary" href="#/deck/${d.id}">Back to deck</a></div>`);
+    return;
+  }
   render(`<div class="empty-state"><div class="big-ic">${I.cards}</div><p>${msg || 'This deck has no complete cards yet.'}</p><a class="btn primary" href="#/deck/${d.id}/edit">Add cards</a></div>`);
 }
 const progressTop = (done, total, label) => `<div class="study-top"><div class="bar"><span style="width:${total ? (done / total) * 100 : 0}%"></span></div><span class="count">${label ?? `${done} / ${total}`}</span></div>`;
@@ -1610,17 +1693,18 @@ function writtenQuestion(el, it, done) {
     const A = `<b ${langAttr(ansEs)}>${rich(it.answer)}</b>`;
     if (state.settings.autoSpeak && ansEs) speak(it.answer);
     if (res === 'correct') {
+      markPass(it.c, 'wr', true);
       inp.classList.add('ok'); feedback(el, 'good', praise()); later(() => done(true), 850);
     } else if (res === 'accent' && !state.settings.strictAccents) {
       inp.classList.add('ok'); feedback(el, 'warn', `Almost! Watch the accents: ${A}`, () => done(true));
     } else if (res === 'typo') {
       inp.classList.add('ok'); feedback(el, 'warn', `Close enough — check the spelling: ${A}`, () => done(true));
     } else {
-      inp.classList.add('bad');
+      inp.classList.add('bad'); markPass(it.c, 'wr', false);
       const extra = given ? '<button class="btn ghost" type="button" id="override">I was right</button>' : '';
       feedback(el, 'bad', `${given ? `You wrote <s>${esc(given)}</s><br>` : ''}The answer is ${A}${res === 'accent' ? '<br><span class="muted small">Accents count because strict mode is on.</span>' : ''}`, () => done(false), extra);
       const ov = $('#override', el);
-      if (ov) ov.onclick = () => { keyHandler = null; done(true); };
+      if (ov) ov.onclick = () => { keyHandler = null; markPass(it.c, 'wr', true); done(true); };
     }
   };
   $('form', el).onsubmit = (e) => { e.preventDefault(); if (answered) return; const v = inp.value.trim(); if (!v) { inp.focus(); return; } submit(v); };
@@ -1634,7 +1718,7 @@ function faceHtml(c, text, isEs, front) {
 
 /* ---------- views: flashcards ---------- */
 function flashView(id, q) {
-  const d = getDeck(id); if (!d) return;
+  const d = getDeck(id); if (!d) return; const t0 = Date.now();
   setHeader('Flashcards', `#/deck/${id}`);
   const all = studyCards(d, q); if (!all.length) return emptyStudy(d);
   let items; let i; let known; let missed;
@@ -1667,7 +1751,7 @@ function flashView(id, q) {
     };
     const grade = (ok) => {
       if (graded) return; graded = true; keyHandler = null;
-      (ok ? known : missed).push(it.c); practice(it.c, ok);
+      (ok ? known : missed).push(it.c); markPass(it.c, 'fc', ok); practice(it.c, ok);
       sw.classList.remove('dragging'); sw.classList.add(ok ? 'fly-right' : 'fly-left');
       later(() => { i++; show(); }, 200);
     };
@@ -1713,6 +1797,7 @@ function flashView(id, q) {
       <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
       <h2>${missed.length ? '¡Buen trabajo!' : '¡Perfecto!'}</h2>
       <p class="muted">You knew ${known.length} of ${items.length}.${missed.length ? ` ${plural(missed.length, 'card')} still need practice.` : ''}</p>
+      ${wonHtml(t0)}
       <div class="stack">
         ${missed.length ? `<button class="btn primary block" id="again">Study the ${missed.length} I missed</button>` : ''}
         <button class="btn block" id="restart">Start over</button>
@@ -1727,7 +1812,7 @@ function flashView(id, q) {
 
 /* ---------- views: learn ---------- */
 function learnView(id, q) {
-  const d = getDeck(id); if (!d) return;
+  const d = getDeck(id); if (!d) return; const t0 = Date.now();
   setHeader('Learn', `#/deck/${id}`);
   const all = studyCards(d, q); if (!all.length) return emptyStudy(d);
   const distractorPool = d.cards.filter(isValid);
@@ -1760,6 +1845,7 @@ function learnView(id, q) {
       <div class="big-ic">${I.trophy}</div>
       <h2>¡Lo lograste!</h2>
       <p class="muted">You learned all ${plural(items.length, 'card')}${hard.length ? ` — ${hard.length} gave you trouble.` : ' with no mistakes.'}</p>
+      ${wonHtml(t0)}
       ${hard.length ? `<div class="card-list compact">${hard.slice(0, 10).map((x) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(x.c.term)}</div><div class="cr-def">${rich(x.c.def)}</div></div><span class="pill bad">${x.wrong}×</span></div>`).join('')}</div>` : ''}
       <div class="stack">
         ${hard.length ? '<button class="btn primary block" id="again">Practice the tricky ones</button>' : ''}
@@ -1775,7 +1861,7 @@ function learnView(id, q) {
 
 /* ---------- views: write ---------- */
 function writeView(id, q) {
-  const d = getDeck(id); if (!d) return;
+  const d = getDeck(id); if (!d) return; const t0 = Date.now();
   setHeader('Write', `#/deck/${id}`);
   const all = studyCards(d, q); if (!all.length) return emptyStudy(d);
   let items; let i; let results;
@@ -1795,6 +1881,7 @@ function writeView(id, q) {
     render(`<div class="summary">
       <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
       <h2>${right} of ${results.length} correct</h2>
+      ${wonHtml(t0)}
       ${wrong.length ? `<div class="card-list compact">${wrong.map((c) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div>${sayBtn(c.term)}</div>`).join('')}</div>` : '<p class="muted">Not a single mistake. ¡Increíble!</p>'}
       <div class="stack">
         ${wrong.length ? `<button class="btn primary block" id="again">Retry the ${wrong.length} I missed</button>` : ''}
@@ -1881,11 +1968,11 @@ function reviewView(q) {
   const deck = deckId ? getDeck(deckId) : null; if (deckId && !deck) return;
   setHeader(deck ? `Review · ${deck.name}` : 'Review', deck ? `#/deck/${deckId}` : '#/');
   const queue = buildReviewQueue(deckId, +q.get('extra') || 0);
-  let done = 0; let lapses = 0;
+  let done = 0; let lapses = 0; const t0 = Date.now();
 
   if (!queue.length) {
     const decks = deckId ? [deck] : state.decks;
-    const newLeft = decks.reduce((s, d) => s + d.cards.filter((c) => isValid(c) && !c.srs.last).length, 0);
+    const newLeft = decks.reduce((s, d) => s + d.cards.filter((c) => isValid(c) && !isMine(c) && !c.srs.last).length, 0);
     const extraHref = `#/review?${deckId ? `deck=${deckId}&` : ''}extra=10`;
     render(`<div class="empty-state">
       <div class="big-ic">${I.check}</div><h2>¡Todo listo!</h2>
@@ -1902,6 +1989,7 @@ function reviewView(q) {
   };
   const rateCard = (c, qv) => {
     keyHandler = null;
+    if (qv === 0) markPass(c, 'fc', false); else if (qv >= 2) markPass(c, 'fc', true);
     gradeCard(c, qv); save();
     const item = queue.shift();
     if (qv === 0) { lapses++; queue.splice(Math.min(queue.length, 4), 0, item); } else done++;
@@ -1974,6 +2062,7 @@ function reviewView(q) {
       const res = given ? checkAnswer(given, it.answer) : null;
       const ok = res === 'correct' || res === 'typo' || (res === 'accent' && !state.settings.strictAccents);
       if (given) inp.classList.add(ok ? 'ok' : 'bad');
+      if (res === 'correct') markPass(c, 'wr', true); else if (given && !ok) markPass(c, 'wr', false);
       const suggested = given ? (ok ? (res === 'correct' ? 2 : 1) : 0) : -1;
       let note = '';
       if (given && !ok) note = `<p class="muted">You wrote <s>${esc(given)}</s></p>`;
@@ -2004,6 +2093,7 @@ function reviewView(q) {
       <h2>¡Hecho por hoy!</h2>
       <p class="muted">You reviewed ${plural(done, 'card')}${lapses ? ` (${lapses} needed another look)` : ''}.</p>
       <p><b>${plural(streak, 'day')}</b> in a row</p>
+      ${wonHtml(t0)}
       <div class="stack"><a class="btn primary block" href="${deckId ? `#/deck/${deckId}` : '#/'}">Done</a></div></div>`);
   }
   show();

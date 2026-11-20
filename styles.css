@@ -184,6 +184,10 @@ main {
 .streak span { font-size: 11px; opacity: .85; white-space: nowrap; }
 .streak svg { width: 22px; height: 22px; opacity: .6; }
 .streak.on svg { color: #ffd23f; fill: #ffd23f; opacity: 1; }
+.hero-badges { display: flex; gap: 8px; flex: none; }
+.mine-badge { color: inherit; text-decoration: none; }
+.mine-badge svg { color: #ffd23f; opacity: 1; }
+.mine-badge:hover { background: rgba(255, 255, 255, .22); }
 
 .install-hint {
   display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px;
@@ -210,6 +214,7 @@ main {
 .deck-tile p { margin: 0 0 10px; font-size: 14px; }
 .due { color: var(--primary); font-weight: 600; }
 .progress { display: flex; height: 6px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.p-mine { background: var(--primary); }
 .p-known { background: var(--good); }
 .p-learning { background: var(--accent); }
 .empty { padding: 20px; text-align: center; color: var(--muted); margin: 0; }
@@ -264,6 +269,22 @@ main {
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--border); margin-right: 4px; }
 .dot.learning { background: var(--accent); }
 .dot.known { background: var(--good); }
+.dot.mine { background: var(--primary); }
+.mine-n { color: var(--primary); font-weight: 600; }
+.stats4 { grid-template-columns: repeat(4, 1fr); }
+.stat-mine { color: var(--primary); text-decoration: none; }
+.stat-mine span { color: var(--primary); }
+.words-hero { display: grid; justify-items: center; gap: 2px; padding: 18px 0 12px; text-align: center; }
+.words-ic svg { width: 40px; height: 40px; color: var(--primary); }
+.words-num { font-size: 56px; font-weight: 800; line-height: 1.05; color: var(--primary); }
+.words-hero p { margin: 0; color: var(--muted); }
+.steps { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.pill.step { font-size: 12px; text-align: left; }
+.pill.ok { background: var(--good-soft); color: var(--good); font-weight: 600; }
+.won { display: grid; gap: 4px; justify-items: center; margin: 10px 0 4px; padding: 12px 16px; border-radius: 14px; background: color-mix(in srgb, var(--primary) 12%, transparent); max-width: 380px; }
+.won b { color: var(--primary); }
+.won-list { font-size: 15px; }
+.won a { font-size: 14px; color: var(--primary); font-weight: 600; }
 .danger-row { display: flex; gap: 8px; justify-content: space-between; margin-top: 16px; flex-wrap: wrap; }
 
 /* ---------- Forms ---------- */
