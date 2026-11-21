@@ -1032,7 +1032,8 @@ function wordsView() {
     </details>
     ${almost.length ? `<section class="panel"><h3>Almost yours (${almost.length})</h3><p class="muted small">One step done, one to go.</p><div class="card-list compact">${almost.slice(0, 60).map(({ c }) => `<div class="card-row"><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div></div><div class="steps">${step(passedFc(c), 'Flashcard')}${step(passedWr(c), 'Write')}</div></div>`).join('')}</div></section>` : ''}
     <section class="panel"><h3>Your words</h3>
-      ${mine.length ? `<div class="card-list compact">${mine.map(({ c, d }) => `<div class="card-row" data-id="${c.id}"><span class="dot mine"></span><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div><div class="muted small">${esc(d.name)} · since ${new Date(c.m.own).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</div></div>${sayBtn(c.term)}<button type="button" class="btn sm ghost unown">Practice again</button></div>`).join('')}</div>`
+      ${mine.length ? '<p class="muted small">Tap <b>Remove</b> to take a word off your list. It goes back into Review and practice, and you can earn it again.</p>' : ''}
+      ${mine.length ? `<div class="card-list compact">${mine.map(({ c, d }) => `<div class="card-row" data-id="${c.id}"><span class="dot mine"></span><div class="cr-text"><div class="cr-term" lang="es">${rich(c.term)}</div><div class="cr-def">${rich(c.def)}</div><div class="muted small">${esc(d.name)} · since ${new Date(c.m.own).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</div></div>${sayBtn(c.term)}<button type="button" class="btn sm ghost unown" aria-label="Remove ${esc(plain(c.term))} from my words">${I.x} Remove</button></div>`).join('')}</div>`
         : '<p class="muted">No words yet. Open a deck, tap <b>Know it</b> on the words you know in Flashcards, then type them in Write. They’ll show up here.</p>'}
     </section>
   </div>`);
@@ -1041,7 +1042,7 @@ function wordsView() {
     const id = b.closest('.card-row').dataset.id;
     const hit = all.find((x) => x.c.id === id); if (!hit) return;
     const now = Date.now(); Object.assign(hit.c.m, { off: now, fx: now, wx: now });
-    save(); toast(`“${plain(hit.c.term)}” is back in practice`); wordsView();
+    save(); toast(`Removed “${plain(hit.c.term)}” from your words — it’s back in practice`); wordsView();
   });
 }
 
