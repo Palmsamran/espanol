@@ -2407,10 +2407,11 @@ function updateSyncUI() {
   const p = $('#syncPanel'); if (p) p.innerHTML = syncPanelHtml();
   const l = $('#syncLine'); if (l) l.innerHTML = syncLineHtml();
 }
-function aiPanelHtml(err = '') {
+function aiPanelHtml(err = '', ok = '') {
   if (ai.key) {
     return `<h3>Story time (Google Gemini)</h3>
       <div class="sync-status good">${I.check} Gemini key saved${ai.model ? ` · using ${esc(ai.model)}` : ''}</div>
+      ${ok ? `<div class="sync-status good">${I.check} ${esc(ok)}</div>` : ''}
       <p class="muted small">The key stays on this device. Add it on your other devices too if you want Story time there.</p>
       ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
       <div class="stack"><button class="btn block" type="button" id="aiTest">Test key</button><button class="btn block ghost danger" type="button" id="aiRemove">Remove key</button></div>`;
@@ -2429,7 +2430,7 @@ function aiPanelHtml(err = '') {
     <p class="muted small">The key is stored only on this device (not synced, not in backups). Only the words you practice are sent to Google. On the free tier, Google may use what you send to improve its products.</p>`;
 }
 function wireAiPanel(panel) {
-  const redraw = (err) => { panel.innerHTML = aiPanelHtml(err); };
+  const redraw = (err, ok) => { panel.innerHTML = aiPanelHtml(err, ok); };
   panel.addEventListener('submit', async (e) => {
     e.preventDefault();
     const inp = $('#aiKey', panel); const key = inp.value.replace(/[\s"'“”‘’]+/g, ''); if (!key) { inp.focus(); return; }
@@ -2446,12 +2447,16 @@ function wireAiPanel(panel) {
   panel.addEventListener('click', async (e) => {
     if (e.target.closest('#aiRemove')) { ai = {}; saveAi(); redraw(); toast('Gemini key removed'); return; }
     const t = e.target.closest('#aiTest'); if (!t) return;
-    t.disabled = true; t.textContent = 'Testing…';
+    t.disabled = true; t.textContent = 'Testing… (asking Gemini to write a sentence)';
     try {
       ai.models = await gemModels(ai.key); ai.modelsAt = Date.now(); saveAi();
-      redraw(ai.models.length ? '' : 'The key works, but no Gemini Flash model is available for it.');
-      if (ai.models.length) toast('Your Gemini key works');
-    } catch (err) { redraw(gemErrorText(err)); }
+      if (!ai.models.length) { redraw('The key works, but no Gemini Flash model is available for it.'); return; }
+      // A real (tiny) request, since listing models only proves the key exists.
+      const text = await gemGenerate('Write one very short, simple Spanish sentence for a beginner. Reply with JSON only: {"es": "...", "en": "..."}');
+      let line = '';
+      try { const j = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '')); line = j.es ? ` It wrote: “${j.es}”${j.en ? ` (${j.en})` : ''}` : ''; } catch { /* the reply itself is enough */ }
+      redraw('', `Test passed — Gemini answered using ${ai.model}.${line}`);
+    } catch (err) { redraw(`Test failed: ${gemErrorText(err)}`); }
   });
 }
 function wireSyncPanel(panel) {
