@@ -619,3 +619,7 @@ mark.st-w { background: color-mix(in srgb, var(--primary) 18%, transparent); col
 .st-in.bad { border-color: var(--bad); background: var(--bad-soft); }
 .st-fb { font-size: 14px; font-weight: 600; align-self: center; }
 .st-fb.good { color: var(--good); } .st-fb.warn { color: var(--warn); } .st-fb.bad { color: var(--bad); }
+
+.st-card.covered .st-body, .st-card.covered .st-tools, .st-card.covered > .muted.small.center { display: none; }
+.st-cover { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.st-cover p { margin: 0; }

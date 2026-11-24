@@ -1140,15 +1140,30 @@ function parseStory(text, type) {
 const STORY_KEY = 'espanol.story';
 const loadStory = () => { try { return JSON.parse(localStorage.getItem(STORY_KEY)); } catch { return null; } };
 const keepStory = (x) => { try { localStorage.setItem(STORY_KEY, JSON.stringify(x)); } catch { /* ignore */ } };
-function storyHtml(st) {
+function blankCard(b, words) {
+  const nb = normAns(b.base);
+  return words.find((c) => normAns(plain(c.term)) === nb) || words.find((c) => answerVariants(c.term).includes(nb));
+}
+// The hint under a blank: the word's English meaning, plus the Spanish infinitive
+// only when the answer is a different (conjugated) form, so it never gives the answer away.
+function blankHint(b, words) {
+  const card = blankCard(b, words);
+  const bits = [];
+  if (card) bits.push(esc(plain(card.def)));
+  const base = b.base.trim();
+  if (/^[a-záéíóúüñ]+(ar|er|ir|arse|erse|irse)$/i.test(base) && normAns(base) !== normAns(b.form)) bits.push(`<span lang="es">${esc(base)}</span>`);
+  return bits.length ? ` · (${bits.join(' · ')})` : '';
+}
+function storyHtml(st, words = []) {
   return `<article class="st-card">
+    <div class="st-cover" hidden><p class="muted">The story is hidden while you fill in the missing words.</p><button type="button" class="btn sm ghost" id="stPeek">Show the story</button></div>
     ${st.title ? `<h2 class="st-title" lang="es">${esc(st.title)}</h2>${st.title_en ? `<p class="muted st-title-en">${esc(st.title_en)}</p>` : ''}` : ''}
     <div class="st-tools">${canSpeak ? `<button type="button" class="btn sm ghost" id="stRead">${I.speaker} Read aloud</button>` : ''}<button type="button" class="btn sm ghost" id="stAllEn">Show English</button></div>
     <div class="st-body">${st.sentences.map((x, i) => `<div class="st-s" data-i="${i}" role="button" tabindex="0"><p lang="es">${esMarked(x.es)}</p><p class="st-en" hidden>${esc(x.en)}</p></div>`).join('')}</div>
     <p class="muted small center">Tap a sentence to see it in English.</p>
   </article>
   ${st.questions.length ? `<section class="panel st-quiz"><h3>Did you understand?</h3>${st.questions.map((q, i) => `<div class="st-q" data-i="${i}"><p><b lang="es">${esc(q.q)}</b>${q.q_en ? `<br><span class="muted small">${esc(q.q_en)}</span>` : ''}</p><div class="st-opts">${q.options.map((o, k) => `<button type="button" class="btn st-opt" data-k="${k}" lang="es">${esc(o)}</button>`).join('')}</div></div>`).join('')}</section>` : ''}
-  ${st.blanks.length ? `<section class="panel st-fill"><h3>Fill in the missing word</h3><p class="muted small">Type the exact word from the story. Words you get exactly right count toward <b>My words</b>.</p>${st.blanks.map((b, n) => `<form class="st-b" data-n="${n}" autocomplete="off"><p lang="es">${esc(b.before)}<input class="st-in" lang="es" aria-label="Missing word" autocapitalize="off" autocorrect="off" spellcheck="false" style="width:${Math.max(4, b.form.length + 1)}ch">${esc(b.after)}</p><p class="muted small">${esc(st.sentences[b.i].en)} · <span lang="es">(${esc(b.base)})</span></p><div class="row gap"><button class="btn sm" type="submit">Check</button><span class="st-fb"></span></div></form>`).join('')}</section>` : ''}`;
+  ${st.blanks.length ? `<section class="panel st-fill"><h3>Fill in the missing word</h3><p class="muted small">Type the exact word from the story. Words you get exactly right count toward <b>My words</b>. The story hides while you do this.</p><button type="button" class="btn primary block" id="stFillGo">Start</button><div class="st-blist" hidden>${st.blanks.map((b, n) => `<form class="st-b" data-n="${n}" autocomplete="off"><p lang="es">${esc(b.before)}<input class="st-in" lang="es" aria-label="Missing word" autocapitalize="off" autocorrect="off" spellcheck="false" style="width:${Math.max(6, b.form.length + 2)}ch">${esc(b.after)}</p><p class="muted small">${esc(st.sentences[b.i].en)}${blankHint(b, words)}</p><div class="row gap"><button class="btn sm" type="submit">Check</button><span class="st-fb"></span></div></form>`).join('')}</div></section>` : ''}`;
 }
 function storyView(q) {
   const deckId = q.get('deck') || '';
@@ -1179,7 +1194,7 @@ function storyView(q) {
       <button type="button" class="btn primary block" id="stGo" ${busy ? 'disabled' : ''}>${I.book} ${busy ? 'Writing…' : `${story ? 'New' : 'Write a'} ${prefs.type === 'story' ? 'story' : 'set of sentences'}`}</button>`
         : `<p class="empty">You need at least 3 words you're still learning${deck ? ' in this deck' : ''}. Add cards, or remove some from My words.</p>`}
       ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
-      <div id="stOut">${busy ? '<p class="muted center st-wait">✍️ Writing with your words…</p>' : story ? storyHtml(story) : ''}</div>
+      <div id="stOut">${busy ? '<p class="muted center st-wait">✍️ Writing with your words…</p>' : story ? storyHtml(story, words) : ''}</div>
     </div>`);
     const root = $('#story');
     root.addEventListener('change', (e) => {
@@ -1218,6 +1233,17 @@ function storyView(q) {
         if (k !== qd.answer) opt.classList.add('bad');
         return;
       }
+      const fillGo = e.target.closest('#stFillGo');
+      if (fillGo) {
+        fillGo.hidden = true;
+        $('.st-blist', root).hidden = false;
+        $('.st-card', root).classList.add('covered'); $('.st-cover', root).hidden = false;
+        $$('.st-q', root).forEach((x) => { x.hidden = true; }); // the quiz options can repeat the words too
+        const first = $('.st-in', root); if (first) first.focus();
+        return;
+      }
+      const peek = e.target.closest('#stPeek');
+      if (peek) { const c = $('.st-card', root); const on = c.classList.toggle('covered'); peek.textContent = on ? 'Show the story' : 'Hide the story'; return; }
       if (e.target.closest('#stRead')) { speak(story.sentences.map((x) => esClean(x.es)).join(' ')); return; }
       const all = e.target.closest('#stAllEn');
       if (all) { const show = all.textContent.includes('Show'); $$('.st-en', root).forEach((p) => { p.hidden = !show; }); all.textContent = show ? 'Hide English' : 'Show English'; }
@@ -1235,8 +1261,7 @@ function storyView(q) {
       inp.classList.remove('ok', 'bad');
       if (res === 'correct') {
         inp.classList.add('ok'); fb.textContent = '✓ ¡Correcto!'; fb.className = 'st-fb good';
-        const nb = normAns(b.base);
-        const card = words.find((c) => normAns(plain(c.term)) === nb) || words.find((c) => answerVariants(c.term).includes(nb));
+        const card = blankCard(b, words);
         if (card) markPass(card, 'wr', true);
       } else if (res === 'accent' || res === 'typo') {
         inp.classList.add('bad'); fb.textContent = `Almost — it’s “${b.form}”`; fb.className = 'st-fb warn';
