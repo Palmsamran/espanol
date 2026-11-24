@@ -47,6 +47,7 @@ const I = {
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>'),
   trash: svg('<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>'),
   globe: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
+  book: svg('<path d="M4 4.5A1.5 1.5 0 015.5 3H20v15H5.5A1.5 1.5 0 004 19.5z"/><path d="M4 19.5A1.5 1.5 0 005.5 21H20v-3"/><path d="M8 7h8M8 11h6"/>'),
   search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>'),
   image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>'),
   shuffle: svg('<path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/>'),
@@ -873,6 +874,7 @@ const routes = [
   [/^#\/settings$/, () => settingsView()],
   [/^#\/dupes$/, () => dupesView()],
   [/^#\/words$/, () => wordsView()],
+  [/^#\/story$/, (q) => storyView(q)],
 ];
 function route() {
   cleanups.forEach((f) => { try { f(); } catch (e) { console.error(e); } });
@@ -1006,6 +1008,243 @@ function dupesView() {
   };
 }
 
+/* ---------- story time (Google Gemini) ---------- */
+// Your own free Gemini API key, kept only on this device (not synced, not in backups).
+const AI_KEY = 'espanol.ai';
+let ai = (() => { try { return JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { return {}; } })();
+const saveAi = () => { try { localStorage.setItem(AI_KEY, JSON.stringify(ai)); } catch { /* ignore */ } };
+const GEM = 'https://generativelanguage.googleapis.com/v1beta';
+async function gemFetch(path, key, body) {
+  const res = await fetch(`${GEM}${path}`, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'x-goog-api-key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = ''; try { msg = (await res.json()).error?.message || ''; } catch { /* ignore */ }
+    const e = new Error(msg || `Gemini error ${res.status}`); e.status = res.status; throw e;
+  }
+  return res.json();
+}
+// The Flash models this key can use, best first (Flash before Flash-Lite, newest version first).
+async function gemModels(key) {
+  const all = []; let tok = '';
+  for (let i = 0; i < 5; i++) {
+    const j = await gemFetch(`/models?pageSize=1000${tok ? `&pageToken=${encodeURIComponent(tok)}` : ''}`, key);
+    all.push(...(j.models || [])); tok = j.nextPageToken; if (!tok) break;
+  }
+  const rank = (id) => { const m = /^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$/.exec(id); return m ? [m[2] ? 0 : 1, parseFloat(m[1])] : null; };
+  return all.filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map((m) => String(m.name || '').replace(/^models\//, '')).filter((id) => rank(id))
+    .sort((a, b) => { const x = rank(a); const y = rank(b); return (y[0] - x[0]) || (y[1] - x[1]); });
+}
+async function gemGenerate(prompt) {
+  const key = ai.key;
+  if (!key) { const e = new Error('No Gemini key'); e.code = 'nokey'; throw e; }
+  let list = ai.models && Date.now() - (ai.modelsAt || 0) < 7 * 864e5 ? ai.models : null;
+  if (!list) { list = await gemModels(key); ai.models = list; ai.modelsAt = Date.now(); saveAi(); }
+  if (ai.model && list.includes(ai.model)) list = [ai.model, ...list.filter((m) => m !== ai.model)];
+  if (!list.length) { const e = new Error('No Gemini Flash model is available for this key.'); e.code = 'nomodel'; throw e; }
+  let last;
+  for (const model of list.slice(0, 4)) { // a model that's over its free limit falls through to the next one
+    try {
+      const j = await gemFetch(`/models/${model}:generateContent`, key, {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.9 },
+      });
+      const text = (j.candidates?.[0]?.content?.parts || []).filter((x) => !x.thought).map((x) => x.text || '').join('');
+      if (!text.trim()) { last = new Error('Gemini sent an empty reply'); continue; }
+      if (ai.model !== model) { ai.model = model; saveAi(); }
+      return text;
+    } catch (e) {
+      last = e;
+      if (![403, 404, 429, 500, 503].includes(e.status)) throw e;
+    }
+  }
+  throw last;
+}
+function gemErrorText(e) {
+  if (e.code === 'nokey') return 'Add your Gemini key in Settings first.';
+  if (!navigator.onLine) return 'You’re offline. Story time needs the internet.';
+  if (e.status === 400 && /key/i.test(e.message)) return 'Your Gemini key isn’t valid. Check it in Settings.';
+  if (e.status === 429) return 'You’ve reached Gemini’s free limit for now. Try again in a minute (or tomorrow if it’s the daily limit).';
+  if (e.status === 403) return 'This Gemini key isn’t allowed to use the model. Check the key in Google AI Studio.';
+  if (e.code === 'parse') return 'Gemini’s answer came out garbled. Tap the button to try again.';
+  return `Gemini isn’t working right now (${e.message}). Try again in a moment.`;
+}
+
+// Words to practice: ones you're learning (not yet yours), due ones first.
+function storyWords(deckId, n = 7) {
+  const decks = deckId ? state.decks.filter((d) => d.id === deckId) : state.decks;
+  const seen = new Set(); const pool = [];
+  decks.forEach((d) => d.cards.forEach((c) => {
+    const k = dupKey(c.term);
+    if (!isValid(c) || isMine(c) || plain(c.term).length > 50 || seen.has(k)) return;
+    seen.add(k); pool.push(c);
+  }));
+  const rank = (c) => (isDue(c) ? 0 : status(c) === 'learning' ? 1 : status(c) === 'new' ? 2 : 3);
+  const sorted = shuffle(pool).sort((a, b) => rank(a) - rank(b));
+  return shuffle(sorted.slice(0, n * 2)).slice(0, n);
+}
+const MARK_RE = /\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/g;
+const esClean = (t) => t.replace(MARK_RE, '$1');
+const esMarked = (t) => esc(t).replace(MARK_RE, '<mark class="st-w">$1</mark>');
+function storyPrompt(words, type, level) {
+  const dialect = state.settings.voiceLang === 'es-ES' ? 'Spain' : 'Latin American';
+  const lvl = level === 'medium'
+    ? 'CEFR B1 (intermediate): natural sentences, present, past and future tenses are fine'
+    : 'CEFR A1–A2 (beginner): short, simple sentences, mostly present tense, very common words';
+  const what = type === 'story'
+    ? 'a short, fun story of 8 to 10 sentences with a title'
+    : '6 separate everyday example sentences (not a story; set "title" to "")';
+  return `You write reading practice for an English-speaking learner of Spanish.
+
+Words the learner is studying (Spanish = English):
+${words.map((c) => `- ${plain(c.term)} = ${plain(c.def)}`).join('\n')}
+
+Write ${what} in ${dialect} Spanish at ${lvl}. Use every listed word at least once; you may conjugate verbs and change gender or number. Keep all other vocabulary simple.
+Mark every use of a listed word like this: [[form used|listed word]], for example [[comimos|comer]] or [[las mochilas|la mochila]]. Do not mark anything else.
+Then write 3 multiple-choice questions in simple Spanish that check understanding of the text, each with an English translation, 3 options in Spanish, and the 0-based index of the one correct option.
+
+Reply with JSON only, in exactly this shape:
+{"title": "Spanish title", "title_en": "English title", "sentences": [{"es": "Spanish sentence with [[marks|word]]", "en": "English translation"}], "questions": [{"q": "Spanish question", "q_en": "English question", "options": ["…", "…", "…"], "answer": 0}]}`;
+}
+function parseStory(text, type) {
+  const t = String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  const a = t.indexOf('{'); const b = t.lastIndexOf('}');
+  let j;
+  try { j = JSON.parse(t.slice(a, b + 1)); } catch { const e = new Error('parse'); e.code = 'parse'; throw e; }
+  const sentences = (Array.isArray(j.sentences) ? j.sentences : [])
+    .filter((x) => x && typeof x.es === 'string' && x.es.trim())
+    .map((x) => ({ es: x.es.trim(), en: String(x.en || '').trim() })).slice(0, 20);
+  if (!sentences.length) { const e = new Error('parse'); e.code = 'parse'; throw e; }
+  const questions = (Array.isArray(j.questions) ? j.questions : []).map((q) => {
+    const opts = Array.isArray(q?.options) ? q.options.map((o) => String(o).trim()).filter(Boolean).slice(0, 4) : [];
+    const ans = Number.isInteger(q?.answer) ? q.answer : -1;
+    if (!q?.q || opts.length < 2 || ans < 0 || ans >= opts.length) return null;
+    const order = shuffle(opts.map((_, k) => k)); // the model tends to put the right answer first
+    return { q: String(q.q), q_en: String(q.q_en || ''), options: order.map((k) => opts[k]), answer: order.indexOf(ans) };
+  }).filter(Boolean).slice(0, 5);
+  // Fill-in-the-blank: hide the first marked word in up to 5 sentences.
+  const blanks = [];
+  sentences.forEach((x, i) => {
+    if (blanks.length >= 5) return;
+    const m = new RegExp(MARK_RE.source).exec(x.es); if (!m) return;
+    blanks.push({ i, form: m[1].trim(), base: (m[2] || m[1]).trim(), before: esClean(x.es.slice(0, m.index)), after: esClean(x.es.slice(m.index + m[0].length)) });
+  });
+  return { type, title: type === 'story' ? String(j.title || '') : '', title_en: type === 'story' ? String(j.title_en || '') : '', sentences, questions, blanks };
+}
+const STORY_KEY = 'espanol.story';
+const loadStory = () => { try { return JSON.parse(localStorage.getItem(STORY_KEY)); } catch { return null; } };
+const keepStory = (x) => { try { localStorage.setItem(STORY_KEY, JSON.stringify(x)); } catch { /* ignore */ } };
+function storyHtml(st) {
+  return `<article class="st-card">
+    ${st.title ? `<h2 class="st-title" lang="es">${esc(st.title)}</h2>${st.title_en ? `<p class="muted st-title-en">${esc(st.title_en)}</p>` : ''}` : ''}
+    <div class="st-tools">${canSpeak ? `<button type="button" class="btn sm ghost" id="stRead">${I.speaker} Read aloud</button>` : ''}<button type="button" class="btn sm ghost" id="stAllEn">Show English</button></div>
+    <div class="st-body">${st.sentences.map((x, i) => `<div class="st-s" data-i="${i}" role="button" tabindex="0"><p lang="es">${esMarked(x.es)}</p><p class="st-en" hidden>${esc(x.en)}</p></div>`).join('')}</div>
+    <p class="muted small center">Tap a sentence to see it in English.</p>
+  </article>
+  ${st.questions.length ? `<section class="panel st-quiz"><h3>Did you understand?</h3>${st.questions.map((q, i) => `<div class="st-q" data-i="${i}"><p><b lang="es">${esc(q.q)}</b>${q.q_en ? `<br><span class="muted small">${esc(q.q_en)}</span>` : ''}</p><div class="st-opts">${q.options.map((o, k) => `<button type="button" class="btn st-opt" data-k="${k}" lang="es">${esc(o)}</button>`).join('')}</div></div>`).join('')}</section>` : ''}
+  ${st.blanks.length ? `<section class="panel st-fill"><h3>Fill in the missing word</h3><p class="muted small">Type the exact word from the story. Words you get exactly right count toward <b>My words</b>.</p>${st.blanks.map((b, n) => `<form class="st-b" data-n="${n}" autocomplete="off"><p lang="es">${esc(b.before)}<input class="st-in" lang="es" aria-label="Missing word" autocapitalize="off" autocorrect="off" spellcheck="false" style="width:${Math.max(4, b.form.length + 1)}ch">${esc(b.after)}</p><p class="muted small">${esc(st.sentences[b.i].en)} · <span lang="es">(${esc(b.base)})</span></p><div class="row gap"><button class="btn sm" type="submit">Check</button><span class="st-fb"></span></div></form>`).join('')}</section>` : ''}`;
+}
+function storyView(q) {
+  const deckId = q.get('deck') || '';
+  const deck = deckId ? getDeck(deckId) : null; if (deckId && !deck) return;
+  setHeader('Story time', deck ? `#/deck/${deckId}` : '#/');
+  if (!ai.key) {
+    render(`<div class="empty-state"><div class="big-ic">${I.book}</div><h2>Story time</h2>
+      <p>Read short stories and sentences written with the words you're learning, then answer a few questions about them.</p>
+      <p class="muted">It uses Google Gemini, which is free with your own key (takes a minute to set up).</p>
+      <a class="btn primary" href="#/settings?ai=1">Add a free Gemini key</a></div>`);
+    return;
+  }
+  const prefs = ui.story || (ui.story = { type: 'story', level: 'easy' });
+  const byId = new Map(); state.decks.forEach((d) => d.cards.forEach((c) => byId.set(c.id, c)));
+  let saved = loadStory(); if (saved && saved.deckId !== deckId) saved = null;
+  let words = saved ? saved.wordIds.map((id) => byId.get(id)).filter(Boolean) : storyWords(deckId);
+  let story = saved ? saved.data : null;
+  let busy = false;
+
+  function page(err = '') {
+    const enough = words.length >= 3;
+    render(`<div id="story">
+      <div class="st-opts-row">
+        <div class="field"><span>Practice with</span>${seg('stType', [['story', 'A story'], ['sentences', 'Sentences']], prefs.type)}</div>
+        <div class="field"><span>Level</span>${seg('stLevel', [['easy', 'Easy'], ['medium', 'Medium']], prefs.level)}</div>
+      </div>
+      ${enough ? `<div class="st-words"><span class="muted small">Your words:</span>${words.map((c) => `<span class="chip-w" lang="es">${rich(c.term)}</span>`).join('')}<button type="button" class="btn sm ghost" id="stShuffle">${I.shuffle} Other words</button></div>
+      <button type="button" class="btn primary block" id="stGo" ${busy ? 'disabled' : ''}>${I.book} ${busy ? 'Writing…' : `${story ? 'New' : 'Write a'} ${prefs.type === 'story' ? 'story' : 'set of sentences'}`}</button>`
+        : `<p class="empty">You need at least 3 words you're still learning${deck ? ' in this deck' : ''}. Add cards, or remove some from My words.</p>`}
+      ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
+      <div id="stOut">${busy ? '<p class="muted center st-wait">✍️ Writing with your words…</p>' : story ? storyHtml(story) : ''}</div>
+    </div>`);
+    const root = $('#story');
+    root.addEventListener('change', (e) => {
+      if (e.target.name === 'stType') prefs.type = e.target.value;
+      else if (e.target.name === 'stLevel') prefs.level = e.target.value;
+      else return;
+      const b = $('#stGo'); if (b && !busy) b.innerHTML = `${I.book} ${story ? 'New' : 'Write a'} ${prefs.type === 'story' ? 'story' : 'set of sentences'}`;
+    });
+    const sh = $('#stShuffle'); if (sh) sh.onclick = () => { words = storyWords(deckId); story = null; page(); };
+    const go = $('#stGo'); if (go) go.onclick = generate;
+    if (story) wireStory(root);
+  }
+  async function generate() {
+    if (busy) return; busy = true;
+    const type = prefs.type; const level = prefs.level;
+    page();
+    let err = '';
+    try {
+      const text = await gemGenerate(storyPrompt(words, type, level));
+      story = parseStory(text, type);
+      keepStory({ deckId, wordIds: words.map((c) => c.id), data: story, at: Date.now() });
+    } catch (e) { err = gemErrorText(e); }
+    busy = false;
+    if (location.hash.startsWith('#/story')) page(err);
+  }
+  function wireStory(root) {
+    root.addEventListener('click', (e) => {
+      const sEl = e.target.closest('.st-s');
+      if (sEl) { const en = $('.st-en', sEl); en.hidden = !en.hidden; return; }
+      const opt = e.target.closest('.st-opt');
+      if (opt) {
+        const qEl = opt.closest('.st-q'); if (qEl.classList.contains('done')) return;
+        const qd = story.questions[+qEl.dataset.i]; const k = +opt.dataset.k;
+        qEl.classList.add('done');
+        $$('.st-opt', qEl).forEach((b) => { b.disabled = true; if (+b.dataset.k === qd.answer) b.classList.add('ok'); });
+        if (k !== qd.answer) opt.classList.add('bad');
+        return;
+      }
+      if (e.target.closest('#stRead')) { speak(story.sentences.map((x) => esClean(x.es)).join(' ')); return; }
+      const all = e.target.closest('#stAllEn');
+      if (all) { const show = all.textContent.includes('Show'); $$('.st-en', root).forEach((p) => { p.hidden = !show; }); all.textContent = show ? 'Hide English' : 'Show English'; }
+    });
+    root.addEventListener('keydown', (e) => {
+      const sEl = e.target.closest('.st-s');
+      if (sEl && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); const en = $('.st-en', sEl); en.hidden = !en.hidden; }
+    });
+    root.addEventListener('submit', (e) => {
+      const f = e.target.closest('.st-b'); if (!f) return;
+      e.preventDefault();
+      const b = story.blanks[+f.dataset.n]; const inp = $('.st-in', f); const fb = $('.st-fb', f);
+      const given = inp.value.trim(); if (!given) { inp.focus(); return; }
+      const res = checkAnswer(given, b.form);
+      inp.classList.remove('ok', 'bad');
+      if (res === 'correct') {
+        inp.classList.add('ok'); fb.textContent = '✓ ¡Correcto!'; fb.className = 'st-fb good';
+        const nb = normAns(b.base);
+        const card = words.find((c) => normAns(plain(c.term)) === nb) || words.find((c) => answerVariants(c.term).includes(nb));
+        if (card) markPass(card, 'wr', true);
+      } else if (res === 'accent' || res === 'typo') {
+        inp.classList.add('bad'); fb.textContent = `Almost — it’s “${b.form}”`; fb.className = 'st-fb warn';
+      } else {
+        inp.classList.add('bad'); fb.textContent = `It’s “${b.form}”`; fb.className = 'st-fb bad';
+      }
+    });
+  }
+  page();
+}
+
 /* ---------- views: my words ---------- */
 function wordsView() {
   setHeader('My words', '#/');
@@ -1113,6 +1352,7 @@ function home() {
       </div>
       <a class="btn primary block" href="#/review" ${todo ? '' : 'aria-disabled="true" tabindex="-1"'}>${I.review} Start review</a>
     </section>
+    <a class="review-strip story-strip" href="#/story">${I.book}<div><b>Story time</b><span>Read a short story made from the words you're learning</span></div><span class="chev">›</span></a>
     ${dupeHint}
     ${showHint ? `<div class="install-hint">${I.phone}<span>Add Español to your home screen. <a href="#/settings">How?</a></span><button class="icon-btn" id="hideHint" aria-label="Dismiss">${I.x}</button></div>` : ''}
     <div class="section-head">
@@ -1150,6 +1390,7 @@ function deckView(id) {
     ['learn', 'Learn', 'Multiple choice, then typing', I.learn],
     ['write', 'Write', 'Type every answer', I.write],
     ['match', 'Match', 'Race to pair them up', I.match],
+    ['story', 'Story', 'Read your words in a story', I.book],
   ];
   render(`
     <section class="deck-head">
@@ -1157,7 +1398,7 @@ function deckView(id) {
       ${progressBar(r)}
     </section>
     <a class="review-strip" href="#/review?deck=${d.id}">${I.review}<div><b>Review this deck</b><span>${reviewNow ? `${plural(reviewNow, 'card')} ready` : 'Nothing due'} · spaced repetition</span></div><span class="chev">›</span></a>
-    <div class="mode-grid">${modes.map(([m, t, s, ic]) => `<a class="mode" href="#/deck/${d.id}/${m}${qs}"><span class="mode-ic">${ic}</span><b>${t}</b><span class="muted">${s}</span></a>`).join('')}</div>
+    <div class="mode-grid">${modes.map(([m, t, s, ic]) => `<a class="mode" href="${m === 'story' ? `#/story?deck=${d.id}` : `#/deck/${d.id}/${m}${qs}`}"><span class="mode-ic">${ic}</span><b>${t}</b><span class="muted">${s}</span></a>`).join('')}</div>
     ${starred ? `<label class="switch-row"><span class="inline">${I.star} Study starred only (${starred})</span><input type="checkbox" id="starOnly" class="switch" ${so ? 'checked' : ''}></label>` : ''}
     ${r.mine ? `<label class="switch-row"><span class="inline">${I.trophy} Practice my words too (${r.mine})</span><input type="checkbox" id="incMine" class="switch" ${im ? 'checked' : ''}></label>` : ''}
     <div class="section-head">
@@ -2163,6 +2404,53 @@ function updateSyncUI() {
   const p = $('#syncPanel'); if (p) p.innerHTML = syncPanelHtml();
   const l = $('#syncLine'); if (l) l.innerHTML = syncLineHtml();
 }
+function aiPanelHtml(err = '') {
+  if (ai.key) {
+    return `<h3>Story time (Google Gemini)</h3>
+      <div class="sync-status good">${I.check} Gemini key saved${ai.model ? ` · using ${esc(ai.model)}` : ''}</div>
+      <p class="muted small">The key stays on this device. Add it on your other devices too if you want Story time there.</p>
+      ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
+      <div class="stack"><button class="btn block" type="button" id="aiTest">Test key</button><button class="btn block ghost danger" type="button" id="aiRemove">Remove key</button></div>`;
+  }
+  return `<h3>Story time (Google Gemini)</h3>
+    <p class="muted">Story time writes short stories and sentences with the words you're learning. It uses Google Gemini, which is free with your own key:</p>
+    <ol class="install">
+      <li><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free API key</a> in Google AI Studio: sign in with Google, tap <b>Create API key</b>, and copy it.</li>
+      <li>Paste it here.</li>
+    </ol>
+    <form class="answer-form" id="aiForm" autocomplete="off">
+      <input id="aiKey" type="password" placeholder="Paste key (AIza…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+    ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
+    <p class="muted small">The key is stored only on this device (not synced, not in backups). Only the words you practice are sent to Google. On the free tier, Google may use what you send to improve its products.</p>`;
+}
+function wireAiPanel(panel) {
+  const redraw = (err) => { panel.innerHTML = aiPanelHtml(err); };
+  panel.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const inp = $('#aiKey', panel); const key = inp.value.trim(); if (!key) { inp.focus(); return; }
+    const btn = $('button[type=submit]', panel); btn.disabled = true; btn.textContent = 'Checking…';
+    try {
+      const models = await gemModels(key);
+      ai = { key, models, modelsAt: Date.now(), model: '' }; saveAi();
+      redraw(models.length ? '' : 'The key works, but no Gemini Flash model is available for it.');
+      if (models.length) toast('Gemini key saved — try Story time!');
+    } catch (err) {
+      redraw(err.status === 400 || err.status === 403 ? 'That key didn’t work. Check that you copied the whole key.' : gemErrorText(err));
+    }
+  });
+  panel.addEventListener('click', async (e) => {
+    if (e.target.closest('#aiRemove')) { ai = {}; saveAi(); redraw(); toast('Gemini key removed'); return; }
+    const t = e.target.closest('#aiTest'); if (!t) return;
+    t.disabled = true; t.textContent = 'Testing…';
+    try {
+      ai.models = await gemModels(ai.key); ai.modelsAt = Date.now(); saveAi();
+      redraw(ai.models.length ? '' : 'The key works, but no Gemini Flash model is available for it.');
+      if (ai.models.length) toast('Your Gemini key works');
+    } catch (err) { redraw(gemErrorText(err)); }
+  });
+}
 function wireSyncPanel(panel) {
   panel.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2221,6 +2509,7 @@ function settingsView() {
     </section>` : ''}
     <section class="panel"><h3>Appearance</h3>${seg('theme', [['system', 'Auto'], ['light', 'Light'], ['dark', 'Dark']], s.theme)}</section>
     <section class="panel" id="syncPanel">${syncPanelHtml()}</section>
+    <section class="panel" id="aiPanel">${aiPanelHtml()}</section>
     <section class="panel"><h3>Backup</h3>
       <p class="muted">Save a copy of all your cards and progress as a file, or restore one.</p>
       <div class="stack">
@@ -2241,6 +2530,8 @@ function settingsView() {
   </div>`);
   const root = $('#settings');
   wireSyncPanel($('#syncPanel'));
+  wireAiPanel($('#aiPanel'));
+  if (/[?&]ai=1/.test(location.hash)) { $('#aiPanel').scrollIntoView({ block: 'center' }); const k = $('#aiKey'); if (k) k.focus({ preventScroll: true }); }
   root.addEventListener('change', (e) => {
     const t = e.target; if (!t.name || t.closest('#syncPanel')) return;
     if (t.type === 'checkbox') s[t.name] = t.checked;

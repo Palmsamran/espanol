@@ -584,3 +584,38 @@ output { color: var(--text); font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* story time */
+.story-strip { margin-top: 12px; }
+.st-opts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 520px) { .st-opts-row { grid-template-columns: 1fr; gap: 0; } }
+.st-words { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 12px; }
+.chip-w { padding: 3px 10px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); font-size: 14px; }
+.st-words .btn { margin-left: auto; }
+.st-wait { padding: 24px 0; }
+.st-card { margin-top: 16px; padding: 18px 16px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
+.st-title { font-size: 22px; margin: 0; }
+.st-title-en { margin: 2px 0 0; }
+.st-tools { display: flex; gap: 6px; margin: 10px 0 6px; }
+.st-body { display: grid; gap: 2px; }
+.st-s { padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+.st-s:hover, .st-s:focus-visible { background: var(--surface-2); outline: none; }
+.st-s p { margin: 0; font-size: 18px; line-height: 1.5; }
+.st-s .st-en { font-size: 15px; color: var(--muted); margin-top: 2px; }
+mark.st-w { background: color-mix(in srgb, var(--primary) 18%, transparent); color: inherit; border-radius: 4px; padding: 0 2px; font-weight: 600; }
+.st-quiz, .st-fill { margin-top: 14px; }
+.st-q { padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
+.st-q:last-child { border-bottom: 0; }
+.st-q p { margin: 0 0 8px; }
+.st-opts { display: grid; gap: 6px; }
+.st-opt { justify-content: flex-start; text-align: left; }
+.st-opt.ok { background: var(--good-soft); border-color: var(--good); color: var(--good); }
+.st-opt.bad { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.st-b { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.st-b:last-child { border-bottom: 0; }
+.st-b p { margin: 0 0 4px; font-size: 17px; line-height: 1.8; }
+.st-in { display: inline-block; min-width: 4ch; max-width: 100%; padding: 2px 6px; margin: 0 3px; font: inherit; border: 0; border-bottom: 2px solid var(--primary); border-radius: 4px 4px 0 0; background: var(--surface-2); color: var(--text); }
+.st-in.ok { border-color: var(--good); background: var(--good-soft); }
+.st-in.bad { border-color: var(--bad); background: var(--bad-soft); }
+.st-fb { font-size: 14px; font-weight: 600; align-self: center; }
+.st-fb.good { color: var(--good); } .st-fb.warn { color: var(--warn); } .st-fb.bad { color: var(--bad); }
