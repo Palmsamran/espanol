@@ -1021,8 +1021,9 @@ async function gemFetch(path, key, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let msg = ''; try { msg = (await res.json()).error?.message || ''; } catch { /* ignore */ }
-    const e = new Error(msg || `Gemini error ${res.status}`); e.status = res.status; throw e;
+    let msg = ''; let reason = '';
+    try { const er = (await res.json()).error || {}; msg = er.message || ''; reason = (er.details || []).map((x) => x && x.reason).filter(Boolean).join(', '); } catch { /* ignore */ }
+    const e = new Error(msg || `Gemini error ${res.status}`); e.status = res.status; e.reason = reason; throw e;
   }
   return res.json();
 }
@@ -1066,11 +1067,13 @@ async function gemGenerate(prompt) {
 function gemErrorText(e) {
   if (e.code === 'nokey') return 'Add your Gemini key in Settings first.';
   if (!navigator.onLine) return 'You’re offline. Story time needs the internet.';
-  if (e.status === 400 && /key/i.test(e.message)) return 'Your Gemini key isn’t valid. Check it in Settings.';
+  if (/FREE_TIER_VERIFICATION/i.test(e.reason || '') || /verif/i.test(e.message)) return `Google wants you to verify your account before using the free tier. Open aistudio.google.com, follow the verification prompt, then try again. (Google says: ${e.message})`;
+  if (/leaked/i.test(e.message)) return 'Google blocked this key because it was reported as leaked. Create a new key in AI Studio and paste that one.';
+  if ((e.status === 400 || e.status === 401) && /key/i.test(e.message)) return `Google didn’t accept this key (${e.status}${e.reason ? ` ${e.reason}` : ''}). Make sure you copied the whole key — keys starting with “AQ.” are long — then paste it again.`;
   if (e.status === 429) return 'You’ve reached Gemini’s free limit for now. Try again in a minute (or tomorrow if it’s the daily limit).';
   if (e.status === 403) return 'This Gemini key isn’t allowed to use the model. Check the key in Google AI Studio.';
   if (e.code === 'parse') return 'Gemini’s answer came out garbled. Tap the button to try again.';
-  return `Gemini isn’t working right now (${e.message}). Try again in a moment.`;
+  return `Gemini isn’t working right now (${e.status || ''} ${e.reason || ''}: ${e.message}). Try again in a moment.`;
 }
 
 // Words to practice: ones you're learning (not yet yours), due ones first.
@@ -2419,7 +2422,7 @@ function aiPanelHtml(err = '') {
       <li>Paste it here.</li>
     </ol>
     <form class="answer-form" id="aiForm" autocomplete="off">
-      <input id="aiKey" type="password" placeholder="Paste key (AIza…)" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input id="aiKey" type="password" placeholder="Paste key (AIza… or AQ.…)" autocomplete="off" autocapitalize="off" spellcheck="false">
       <button class="btn primary" type="submit">Save</button>
     </form>
     ${err ? `<div class="sync-status bad">${I.alert} ${esc(err)}</div>` : ''}
@@ -2429,7 +2432,7 @@ function wireAiPanel(panel) {
   const redraw = (err) => { panel.innerHTML = aiPanelHtml(err); };
   panel.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const inp = $('#aiKey', panel); const key = inp.value.trim(); if (!key) { inp.focus(); return; }
+    const inp = $('#aiKey', panel); const key = inp.value.replace(/[\s"'“”‘’]+/g, ''); if (!key) { inp.focus(); return; }
     const btn = $('button[type=submit]', panel); btn.disabled = true; btn.textContent = 'Checking…';
     try {
       const models = await gemModels(key);
@@ -2437,7 +2440,7 @@ function wireAiPanel(panel) {
       redraw(models.length ? '' : 'The key works, but no Gemini Flash model is available for it.');
       if (models.length) toast('Gemini key saved — try Story time!');
     } catch (err) {
-      redraw(err.status === 400 || err.status === 403 ? 'That key didn’t work. Check that you copied the whole key.' : gemErrorText(err));
+      redraw(`${gemErrorText(err)} [${key.slice(0, 3)}… ${key.length} characters]`);
     }
   });
   panel.addEventListener('click', async (e) => {
