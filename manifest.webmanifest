@@ -7,7 +7,7 @@
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#efefec",
-  "theme_color": "#3e6b6c",
+  "theme_color": "#efefec",
   "lang": "en",
   "categories": ["education"],
   "icons": [
