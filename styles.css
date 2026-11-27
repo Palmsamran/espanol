@@ -600,10 +600,11 @@ output { color: var(--text); font-weight: 700; }
 .st-card { margin-top: 16px; padding: 18px 16px; border-radius: 18px; background: var(--surface); border: 1px solid var(--border); }
 .st-title { font-size: 22px; margin: 0; }
 .st-title-en { margin: 2px 0 0; }
-.st-tools { display: flex; gap: 6px; margin: 10px 0 6px; }
+.st-tools { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px; }
 .st-body { display: grid; gap: 2px; }
 .st-s { padding: 8px 10px; border-radius: 10px; cursor: pointer; }
 .st-s:hover, .st-s:focus-visible { background: var(--surface-2); outline: none; }
+.st-s.reading { background: var(--primary-soft); box-shadow: inset 3px 0 0 var(--primary); }
 .st-s p { margin: 0; font-size: 18px; line-height: 1.5; }
 .st-s .st-en { font-size: 15px; color: var(--muted); margin-top: 2px; }
 mark.st-w { background: color-mix(in srgb, var(--primary) 18%, transparent); color: inherit; border-radius: 4px; padding: 0 2px; font-weight: 600; }

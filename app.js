@@ -55,6 +55,9 @@ const I = {
   copy: svg('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/>'),
   check: svg('<path d="M20 6L9 17l-5-5"/>'),
   x: svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+  pause: svg('<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>'),
+  play: svg('<path d="M7 4.5v15l12-7.5z"/>'),
+  stop: svg('<rect x="6" y="6" width="12" height="12" rx="1.5"/>'),
   alert: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>'),
   flame: svg('<path d="M12 22c4 0 7-3 7-7 0-5-5-7-5-12-3 2-6 6-6 9-1-1-2-2-2-4-1 2-1 4-1 6 0 5 3 8 7 8z"/>'),
   trophy: svg('<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0z"/><path d="M17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3"/>'),
@@ -714,7 +717,7 @@ function spanishVoice() {
     || vs.find((v) => v.lang.replace('_', '-') === st.voiceLang)
     || vs.find((v) => /^es/i.test(v.lang)) || null;
 }
-function speak(text) {
+function speak(text, onEnd) {
   if (!canSpeak || !text) return;
   const t = plain(text).replace(/\([^)]*\)/g, ' ').trim();
   speechSynthesis.cancel();
@@ -722,6 +725,7 @@ function speak(text) {
   u.lang = state.settings.voiceLang;
   const v = spanishVoice(); if (v) { u.voice = v; u.lang = v.lang; }
   u.rate = state.settings.rate;
+  if (onEnd) { u.onend = onEnd; u.onerror = onEnd; }
   speechSynthesis.speak(u);
 }
 const sayBtn = (text, cls = '') => (canSpeak ? `<button type="button" class="icon-btn say ${cls}" data-say="${esc(plain(text))}" aria-label="Play pronunciation">${I.speaker}</button>` : '');
@@ -1177,7 +1181,7 @@ function storyHtml(st, words = []) {
   return `<article class="st-card">
     <div class="st-cover" hidden><p class="muted">The story is hidden while you fill in the missing words.</p><button type="button" class="btn sm ghost" id="stPeek">Show the story</button></div>
     ${st.title ? `<h2 class="st-title" lang="es">${esc(st.title)}</h2>${st.title_en ? `<p class="muted st-title-en">${esc(st.title_en)}</p>` : ''}` : ''}
-    <div class="st-tools">${canSpeak ? `<button type="button" class="btn sm ghost" id="stRead">${I.speaker} Read aloud</button>` : ''}<button type="button" class="btn sm ghost" id="stAllEn">Show English</button></div>
+    <div class="st-tools">${canSpeak ? `<button type="button" class="btn sm ghost" id="stRead">${I.speaker} Read aloud</button><button type="button" class="btn sm ghost" id="stStop" hidden>${I.stop} Stop</button>` : ''}<button type="button" class="btn sm ghost" id="stAllEn">Show English</button></div>
     <div class="st-body">${st.sentences.map((x, i) => `<div class="st-s" data-i="${i}" role="button" tabindex="0"><p lang="es">${esMarked(x.es)}</p><p class="st-en" hidden>${esc(x.en)}</p></div>`).join('')}</div>
     <p class="muted small center">Tap a sentence to see it in English.</p>
   </article>
@@ -1240,6 +1244,25 @@ function storyView(q) {
     if (location.hash.startsWith('#/story')) page(err);
   }
   function wireStory(root) {
+    // Read aloud one sentence at a time, so it can pause and resume on any phone
+    // (Android ignores speechSynthesis.pause) and the sentence being read is highlighted.
+    let rd = null; // { i: sentence being read, paused, token }
+    const readBtn = $('#stRead', root); const stopBtn = $('#stStop', root);
+    const mark = (i) => $$('.st-s', root).forEach((el) => el.classList.toggle('reading', +el.dataset.i === i));
+    const showRead = () => {
+      if (!readBtn) return;
+      readBtn.innerHTML = !rd ? `${I.speaker} Read aloud` : rd.paused ? `${I.play} Resume` : `${I.pause} Pause`;
+      stopBtn.hidden = !rd;
+    };
+    function readFrom(i) {
+      if (!root.isConnected || !rd) return;
+      if (i >= story.sentences.length) { stopRead(); return; }
+      rd.i = i; const token = ++rd.token;
+      mark(i);
+      const el = $(`.st-s[data-i="${i}"]`, root); if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      speak(esClean(story.sentences[i].es), () => { if (rd && rd.token === token && !rd.paused) readFrom(i + 1); });
+    }
+    function stopRead() { rd = null; speechSynthesis.cancel(); mark(-1); showRead(); }
     root.addEventListener('click', (e) => {
       const sEl = e.target.closest('.st-s');
       if (sEl) { const en = $('.st-en', sEl); en.hidden = !en.hidden; return; }
@@ -1263,7 +1286,13 @@ function storyView(q) {
       }
       const peek = e.target.closest('#stPeek');
       if (peek) { const c = $('.st-card', root); const on = c.classList.toggle('covered'); peek.textContent = on ? 'Show the story' : 'Hide the story'; return; }
-      if (e.target.closest('#stRead')) { speak(story.sentences.map((x) => esClean(x.es)).join(' ')); return; }
+      if (e.target.closest('#stRead')) {
+        if (!rd) { rd = { i: 0, paused: false, token: 0 }; readFrom(0); }
+        else if (rd.paused) { rd.paused = false; readFrom(rd.i); } // resume from the start of the paused sentence
+        else { rd.paused = true; rd.token += 1; speechSynthesis.cancel(); }
+        showRead(); return;
+      }
+      if (e.target.closest('#stStop')) { stopRead(); return; }
       const all = e.target.closest('#stAllEn');
       if (all) { const show = all.textContent.includes('Show'); $$('.st-en', root).forEach((p) => { p.hidden = !show; }); all.textContent = show ? 'Hide English' : 'Show English'; }
     });
