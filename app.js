@@ -1014,12 +1014,23 @@ const AI_KEY = 'espanol.ai';
 let ai = (() => { try { return JSON.parse(localStorage.getItem(AI_KEY)) || {}; } catch { return {}; } })();
 const saveAi = () => { try { localStorage.setItem(AI_KEY, JSON.stringify(ai)); } catch { /* ignore */ } };
 const GEM = 'https://generativelanguage.googleapis.com/v1beta';
-async function gemFetch(path, key, body) {
-  const res = await fetch(`${GEM}${path}`, {
-    method: body ? 'POST' : 'GET',
-    headers: { 'x-goog-api-key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+async function gemFetch(path, key, body, ms = 20000) {
+  // Give up after `ms` so a stalled Google server can't leave the app "Writing…" forever.
+  const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), ms);
+  let res;
+  try {
+    res = await fetch(`${GEM}${path}`, {
+      method: body ? 'POST' : 'GET',
+      headers: { 'x-goog-api-key': key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctl.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const e = new Error(ctl.signal.aborted ? 'Gemini took too long to answer' : 'Couldn’t reach Gemini');
+    e.code = ctl.signal.aborted ? 'timeout' : 'network'; throw e;
+  }
+  clearTimeout(timer);
   if (!res.ok) {
     let msg = ''; let reason = '';
     try { const er = (await res.json()).error || {}; msg = er.message || ''; reason = (er.details || []).map((x) => x && x.reason).filter(Boolean).join(', '); } catch { /* ignore */ }
@@ -1047,31 +1058,39 @@ async function gemGenerate(prompt) {
   if (ai.model && list.includes(ai.model)) list = [ai.model, ...list.filter((m) => m !== ai.model)];
   if (!list.length) { const e = new Error('No Gemini Flash model is available for this key.'); e.code = 'nomodel'; throw e; }
   let last;
-  for (const model of list.slice(0, 4)) { // a model that's over its free limit falls through to the next one
+  for (const model of list.slice(0, 3)) { // a model that's busy, slow or over its free limit falls through to the next one
     try {
-      const j = await gemFetch(`/models/${model}:generateContent`, key, {
+      // Keep "thinking" short: it's a simple writing task and long thinking makes replies slow.
+      const v = parseFloat((/^gemini-(\d+(?:\.\d+)?)/.exec(model) || [])[1]) || 0;
+      const thinking = v >= 3 ? { thinkingLevel: 'low' } : /-lite$/.test(model) ? null : { thinkingBudget: 0 };
+      const ask = (withThinking) => gemFetch(`/models/${model}:generateContent`, key, {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.9 },
-      });
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.9, ...(withThinking && thinking ? { thinkingConfig: thinking } : {}) },
+      }, 45000);
+      let j;
+      try { j = await ask(true); } catch (e) { if (e.status === 400 && thinking && /think/i.test(e.message)) j = await ask(false); else throw e; }
       const text = (j.candidates?.[0]?.content?.parts || []).filter((x) => !x.thought).map((x) => x.text || '').join('');
       if (!text.trim()) { last = new Error('Gemini sent an empty reply'); continue; }
       if (ai.model !== model) { ai.model = model; saveAi(); }
       return text;
     } catch (e) {
       last = e;
-      if (![403, 404, 429, 500, 503].includes(e.status)) throw e;
+      if (e.code === 'timeout' && ai.model === model) { delete ai.model; saveAi(); } // don't keep starting with a slow model
+      if (!(e.code === 'timeout' || e.code === 'network' || [403, 404, 429, 500, 502, 503, 504].includes(e.status))) throw e;
     }
   }
   throw last;
 }
 function gemErrorText(e) {
   if (e.code === 'nokey') return 'Add your Gemini key in Settings first.';
-  if (!navigator.onLine) return 'You’re offline. Story time needs the internet.';
+  if (e.code === 'timeout') return 'Gemini is very slow or not answering right now. Try again in a few minutes.';
+  if (!navigator.onLine && (e.code === 'network' || !e.status)) return 'You’re offline. Story time needs the internet.';
   if (/FREE_TIER_VERIFICATION/i.test(e.reason || '') || /verif/i.test(e.message)) return `Google wants you to verify your account before using the free tier. Open aistudio.google.com, follow the verification prompt, then try again. (Google says: ${e.message})`;
   if (/leaked/i.test(e.message)) return 'Google blocked this key because it was reported as leaked. Create a new key in AI Studio and paste that one.';
   if ((e.status === 400 || e.status === 401) && /key/i.test(e.message)) return `Google didn’t accept this key (${e.status}${e.reason ? ` ${e.reason}` : ''}). Make sure you copied the whole key — keys starting with “AQ.” are long — then paste it again.`;
   if (e.status === 429) return 'You’ve reached Gemini’s free limit for now. Try again in a minute (or tomorrow if it’s the daily limit).';
   if (e.status === 403) return 'This Gemini key isn’t allowed to use the model. Check the key in Google AI Studio.';
+  if (e.code === 'network') return 'Couldn’t reach Gemini. Check your internet connection and try again.';
   if (e.code === 'parse') return 'Gemini’s answer came out garbled. Tap the button to try again.';
   return `Gemini isn’t working right now (${e.status || ''} ${e.reason || ''}: ${e.message}). Try again in a moment.`;
 }

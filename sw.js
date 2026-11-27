@@ -1,7 +1,7 @@
 // Service worker: makes the app load instantly and work offline.
 // Strategy: serve from cache right away, refresh the cache in the background,
 // so updates you deploy show up the next time the app is opened.
-const CACHE = 'espanol-v24';
+const CACHE = 'espanol-v25';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
